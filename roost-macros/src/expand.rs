@@ -32,6 +32,7 @@ use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Ident, Pat, PatType, ReturnType};
 
+use crate::diag::Help;
 use crate::index::{self, Impl, Index};
 use crate::model::{Access, Class, Method};
 use crate::rewrite::{Rewriter, take_super_call};
@@ -385,23 +386,34 @@ fn concrete_class(index: &Index, ci: usize, chain: &[&Class]) -> TokenStream {
     let storage_decls = storage
         .iter()
         .map(|(s, ty, _, docs)| quote!(#(#docs)* #s: ::roost::gc::GcCell<#ty>));
+    // Spanned at the field's type, like everything else that needs `T: Trace`: rustc reports
+    // a missing `Trace` once per span, so the user sees one error, at the type.
     let storage_inits = storage.iter().map(|(s, ty, init, _)| {
-        quote!(#s: ::roost::gc::GcCell::new({ let __roost_init: #ty = #init; __roost_init }))
+        let s = Ident::new(&s.to_string(), ty.span());
+        quote_spanned!(ty.span()=>
+            #s: ::roost::gc::GcCell::new({ let __roost_init: #ty = #init; __roost_init }))
     });
     let trace_asserts = storage.iter().map(
         |(_, ty, _, _)| quote_spanned!(ty.span()=> ::roost::__private::assert_trace::<#ty>();),
     );
-    let trace = |method: TokenStream| -> TokenStream {
-        let calls = storage.iter().map(
-            |(s, ty, _, _)| quote_spanned!(ty.span()=> ::roost::gc::Trace::#method(&self.#s);),
-        );
+    let trace = |method: &str| -> TokenStream {
+        let calls = storage.iter().map(|(s, ty, _, _)| {
+            // The whole call at the field's type (see `storage_inits`).
+            let s = Ident::new(&s.to_string(), ty.span());
+            let method = format_ident!("{}_field", method, span = ty.span());
+            quote_spanned!(ty.span()=> {
+                #[allow(unused_imports)]
+                use ::roost::__private::{TraceFallback as _, TraceViaTrace as _};
+                (&::roost::__private::TraceField::<#ty>::new()).#method(&self.#s);
+            })
+        });
         quote!(#(#calls)*)
     };
     let (t_trace, t_root, t_unroot, t_glue) = (
-        trace(quote!(trace)),
-        trace(quote!(root)),
-        trace(quote!(unroot)),
-        trace(quote!(finalize_glue)),
+        trace("trace"),
+        trace("root"),
+        trace("unroot"),
+        trace("finalize_glue"),
     );
     let unsafe_block = |body: TokenStream| {
         if storage.is_empty() {
@@ -547,8 +559,11 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         ),
     };
     let vis = access.to_rust();
+    let has_ctor = class.ctor.is_some();
     let super_call = take_super_call(&mut body);
+    let before = errors.len();
     let (body, ctor_allow) = rewrite_body(index, ci, true, &body, errors);
+    let body_failed = errors.len() > before;
 
     let super_stmt = match (index.parent(ci), super_call) {
         (Some(p), Some((sspan, mut args))) => {
@@ -566,18 +581,36 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         }
         (Some(p), None) => {
             let parent = &index.classes[p];
-            if parent.ctor.as_ref().is_some_and(|c| !c.params.is_empty()) {
-                errors.push(syn::Error::new(
-                    span,
-                    format!(
-                        "`{}` has no no-arg constructor: call `super(...)` as the first \
-                         statement of a constructor",
-                        parent.name
-                    ),
-                ));
-            }
             let ptr = index::trait_name(parent);
-            quote!(<dyn #ptr>::#construct(this);)
+            if parent.ctor.as_ref().is_some_and(|c| !c.params.is_empty()) {
+                // Reported here (unless the body already has an error, such as a misplaced
+                // `super(..)`); no call is generated, so rustc adds nothing about it.
+                if !body_failed {
+                    let help = if has_ctor {
+                        format!(
+                            "Java would insert `super()` here, but `{0}`'s constructor takes \
+                             arguments: start this constructor with `super(..);`",
+                            parent.name
+                        )
+                    } else {
+                        format!(
+                            "declare a constructor that passes the arguments on: \
+                             `{0}(..) {{ super(..); }}`",
+                            class.name
+                        )
+                    };
+                    errors.push(
+                        syn::Error::new(
+                            span,
+                            format!("`{}` has no no-arg constructor", parent.name),
+                        )
+                        .help(help),
+                    );
+                }
+                quote!()
+            } else {
+                quote!(<dyn #ptr>::#construct(this);)
+            }
         }
         (None, Some((sspan, args))) => {
             if !args.is_empty() {
@@ -617,6 +650,8 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         }
     });
     let new_decls: Vec<TokenStream> = new_decls.collect();
+    // At the constructor's name: "associated function defined here" notes point there.
+    let new_fn = Ident::new("new", span);
     let stmts = &body.stmts;
     let new = if class.abstract_.is_some() {
         // Never callable: the bound fails at the call site with the marker's message. (The
@@ -625,7 +660,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         quote! {
             #[doc(hidden)]
             #[allow(private_bounds, unused_variables, clippy::new_ret_no_self)]
-            #vis fn new<'__roost>(#(#new_decls),*) -> ::roost::Ref<dyn #tr>
+            #vis fn #new_fn<'__roost>(#(#new_decls),*) -> ::roost::Ref<dyn #tr>
             where
                 &'__roost (): #marker,
             {
@@ -642,7 +677,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
             #[doc = #doc]
             #(#attrs)*
             #[allow(clippy::new_ret_no_self)]
-            #vis fn new(#(#new_decls),*) -> ::roost::Ref<dyn #tr> {
+            #vis fn #new_fn(#(#new_decls),*) -> ::roost::Ref<dyn #tr> {
                 // Java order: every field gets its default first, then the constructors run
                 // root-first, with `this` already the complete (most-derived) object.
                 let object = #st::__roost_new();

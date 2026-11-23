@@ -8,15 +8,24 @@
 //! * [`index`]: name resolution (superclass chains, `this.field`, `super.m()`) and checks;
 //! * [`rewrite`]: rewriting `this.field` / `super` in bodies;
 //! * [`expand`]: code generation;
-//! * [`main_attr`]: `#[roost::main]`, independent of the rest.
+//! * [`main_attr`]: `#[roost::main]`, independent of the rest;
+//! * [`new_macro`]: `new!(Dog("Rex"))`, Java's `new Dog("Rex")`;
+//! * [`diag`]: error reporting with `help:` lines (nightly `proc_macro::Diagnostic`).
+//!
+//! Every error points at the user's tokens; the compile-fail suite
+//! (`roost/tests/compile_fail/`) pins them down.
+
+#![feature(proc_macro_diagnostic)]
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
+mod diag;
 mod expand;
 mod index;
 mod main_attr;
 mod model;
+mod new_macro;
 mod rewrite;
 
 /// Declares classes. See the `roost` crate.
@@ -34,19 +43,25 @@ pub fn main(
     main_attr::expand(attr.into(), item.into()).into()
 }
 
+/// `new!(Dog("Rex"))`: Java's `new Dog("Rex")`. See the `roost` crate (`roost::new!`).
+#[proc_macro]
+pub fn new(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    new_macro::expand(input.into()).into()
+}
+
 fn expand_class(input: TokenStream) -> TokenStream {
     let hierarchy: model::Hierarchy = match syn::parse2(input) {
         Ok(h) => h,
-        Err(e) => return e.to_compile_error(),
+        Err(e) => return diag::emit([&e]),
     };
     let mut errors = Vec::new();
     let code = match index::Index::build(hierarchy, &mut errors) {
         Some(index) => expand::expand(&index, &mut errors),
         None => TokenStream::new(),
     };
-    let errors = errors.iter().map(syn::Error::to_compile_error);
+    let errors = diag::emit(&errors);
     quote! {
-        #(#errors)*
+        #errors
         #code
     }
 }
@@ -97,7 +112,7 @@ mod tests {
                 class A { public fn f() {} }
                 class B extends A { @Override public fn g() {} }
             },
-            "method `g` does not override or implement a method",
+            "method `g` is marked @Override but does not override or implement a method",
         );
         assert_error(
             quote! {

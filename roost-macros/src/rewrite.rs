@@ -3,7 +3,7 @@
 //! | user writes                | becomes                                                   |
 //! | -------------------------- | --------------------------------------------------------- |
 //! | `this.f` (read)            | `get(field(this.__roost_field_Owner_f(), "Owner", "f"))`: a clone, short borrow |
-//! | `this.f.m(..)`             | `(&get(..)).m(..)`: `&mut self` methods don't compile      |
+//! | `this.f.m(..)`             | `ReadOnlyCopyOfField(get(..)).m(..)`: `&mut self` methods don't compile |
 //! | `this.f = e`               | `set(field(..), e)`                                       |
 //! | `this.f += e` (any op=)    | `{ let mut v = get(..); v += e; set(.., v) }`              |
 //! | `super.m(a)`               | `<dyn OwnerClass>::__roost_method_m(this, a)`              |
@@ -80,12 +80,17 @@ fn is_path(e: &Expr, name: &str) -> bool {
 
 /// `super` as a single-segment path. (`Path::is_ident` is false for keywords.)
 fn is_super(e: &Expr) -> bool {
+    is_keyword(e, "super")
+}
+
+/// `e` is the single-segment path `word`, which may be a keyword (`self`, `super`).
+fn is_keyword(e: &Expr, word: &str) -> bool {
     match e {
         Expr::Path(p) => {
             p.qself.is_none()
                 && p.path.leading_colon.is_none()
                 && p.path.segments.len() == 1
-                && p.path.segments[0].ident == "super"
+                && p.path.segments[0].ident == word
                 && p.path.segments[0].arguments.is_none()
         }
         _ => false,
@@ -120,8 +125,9 @@ fn compound_to_plain(op: &BinOp) -> bool {
 }
 
 impl Rewriter<'_> {
+    /// `msg` may carry a help line after [`index::HELP`].
     fn error(&mut self, span: Span, msg: impl std::fmt::Display) {
-        self.errors.push(syn::Error::new(span, msg));
+        self.errors.push(index::error(span, &msg.to_string()));
     }
 
     /// The class a path's first segment names: `Self` or a class of this block.
@@ -169,7 +175,15 @@ impl Rewriter<'_> {
         match place {
             Place::This(_) => {
                 if !self.has_this {
-                    self.error(name.span(), "there is no `this` in a static method");
+                    self.error(
+                        name.span(),
+                        format!(
+                            "there is no `this` in a static method{}a static method belongs \
+                             to the class, not to an object (as in Java): remove `static`, or \
+                             pass the object in as a parameter",
+                            index::HELP
+                        ),
+                    );
                     return None;
                 }
                 match self.index.resolve_field(self.class, name) {
@@ -180,8 +194,8 @@ impl Rewriter<'_> {
                         let accessor = Ident::new(&accessor.to_string(), name.span());
                         let (class, field) = (owner.name.to_string(), name.to_string());
                         Some(Cell {
-                            get: quote!(::roost::__private::get),
-                            set: quote!(::roost::__private::set),
+                            get: quote_spanned!(name.span()=> ::roost::__private::get),
+                            set: quote_spanned!(name.span()=> ::roost::__private::set),
                             arg: quote_spanned!(name.span()=>
                                 ::roost::__private::field(this.#accessor(), #class, #field)),
                         })
@@ -200,8 +214,8 @@ impl Rewriter<'_> {
                         let key = Ident::new(&key.to_string(), name.span());
                         let (class, field) = (owner.name.to_string(), name.to_string());
                         Some(Cell {
-                            get: quote!(::roost::__private::get_static),
-                            set: quote!(::roost::__private::set_static),
+                            get: quote_spanned!(name.span()=> ::roost::__private::get_static),
+                            set: quote_spanned!(name.span()=> ::roost::__private::set_static),
                             arg: quote_spanned!(name.span()=> &#key, #class, #field),
                         })
                     }
@@ -300,8 +314,10 @@ impl Rewriter<'_> {
             // `&mut self` method (`this.items.push(x)`) is a compile error instead of a
             // silently lost update.
             self.visit_args(call);
-            let read = self.read(&place, call.receiver.span());
-            *call.receiver = parse_quote_spanned!(call.receiver.span()=> (&#read));
+            let rspan = call.receiver.span();
+            let read = self.read(&place, rspan);
+            *call.receiver =
+                parse_quote_spanned!(rspan=> ::roost::__private::ReadOnlyCopyOfField(#read));
             return None;
         }
         visit_mut::visit_expr_method_call_mut(self, call);
@@ -438,7 +454,34 @@ impl VisitMut for Rewriter<'_> {
             Expr::Call(c) if is_super(&c.func) => {
                 self.error(
                     c.func.span(),
-                    "`super(...)` must be the first statement of a constructor",
+                    format!(
+                        "`super(...)` must be the first statement of a constructor{}move it to \
+                         the top of the constructor body, as in Java",
+                        index::HELP
+                    ),
+                );
+                None
+            }
+            Expr::Path(_) if is_keyword(e, "self") => {
+                self.error(
+                    span,
+                    format!(
+                        "use `this`, not `self`, in a class{}roost methods are written like \
+                         Java's: `this.field`, `this.method()`",
+                        index::HELP
+                    ),
+                );
+                None
+            }
+            Expr::Path(_) if is_keyword(e, "null") => {
+                self.error(
+                    span,
+                    format!(
+                        "there is no `null` in roost (nor in Rust){}a reference that can be \
+                         missing is an `Option<Ref<..>>` field: write `None` here, and \
+                         `Some(x)` for a value",
+                        index::HELP
+                    ),
                 );
                 None
             }

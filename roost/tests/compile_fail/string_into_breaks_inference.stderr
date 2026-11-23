@@ -1,0 +1,26 @@
+error[E0283]: type annotations needed
+  --> tests/compile_fail/string_into_breaks_inference.rs:11:29
+   |
+11 |     let _d = Dog::new("Rex".into());
+   |              --------       ^^^^
+   |              |
+   |              required by a bound introduced by this call
+   |
+   = note: the type must implement `Into<String>`
+note: required by a bound in `<(dyn DogClass + 'static)>::new`
+  --> tests/compile_fail/string_into_breaks_inference.rs:6:26
+   |
+ 3 | class! {
+...
+ 6 |         public Dog(name: String) { this.name = name; }
+   |                          ^^^^^^ required by this bound in `<dyn DogClass>::new`
+help: try using a fully qualified path to specify the expected types
+   |
+11 -     let _d = Dog::new("Rex".into());
+11 +     let _d = Dog::new(<&str as Into<T>>::into("Rex"));
+   |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<String>` trivially holds
+   |
+11 -     let _d = Dog::new("Rex".into());
+11 +     let _d = Dog::new("Rex");
+   |

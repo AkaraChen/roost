@@ -1,0 +1,28 @@
+error[E0277]: `Collar` does not implement `Trace`, so it cannot be stored in a garbage-collected object
+ --> tests/compile_fail/field_not_trace.rs:9:25
+  |
+9 |         private collar: Option<Collar>;
+  |                         ^^^^^^^^^^^^^^ not `Trace`
+  |
+help: the trait `Trace` is not implemented for `Collar`
+ --> tests/compile_fail/field_not_trace.rs:3:1
+  |
+3 | struct Collar {
+  | ^^^^^^^^^^^^^
+  = note: for your own type, add `#[derive(Trace, Finalize)]`; a type that holds no `Gc` pointers can use `#[unsafe_ignore_trace]` on the field instead (in roost: `roost::gc::Trace` / `roost::gc::Finalize`)
+  = help: the following other types implement trait `Trace`:
+            &'static T
+            ()
+            (A, B)
+            (A, B, C)
+            (A, B, C, D)
+            (A, B, C, D, E)
+            (A, B, C, D, E, F)
+            (A, B, C, D, E, F, G)
+          and $N others
+  = note: required for `Option<Collar>` to implement `Trace`
+note: required by a bound in `roost::__private::assert_trace`
+ --> src/lib.rs
+  |
+  |     pub fn assert_trace<T: Trace>() {}
+  |                            ^^^^^ required by this bound in `assert_trace`

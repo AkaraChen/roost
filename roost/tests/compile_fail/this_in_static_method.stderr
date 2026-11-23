@@ -3,3 +3,5 @@ error: there is no `this` in a static method
   |
 7 |         public static fn get() -> i32 { this.count + Self::total }
   |                                              ^^^^^
+  |
+  = help: a static method belongs to the class, not to an object (as in Java): remove `static`, or pass the object in as a parameter

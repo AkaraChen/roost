@@ -1,0 +1,7 @@
+error: there is no `null` in roost (nor in Rust)
+ --> tests/compile_fail/null_field.rs:6:44
+  |
+6 |         public fn forget() { this.friend = null; }
+  |                                            ^^^^
+  |
+  = help: a reference that can be missing is an `Option<Ref<..>>` field: write `None` here, and `Some(x)` for a value

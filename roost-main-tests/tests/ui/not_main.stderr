@@ -3,3 +3,5 @@ error: `#[roost::main]` goes on the program's `fn main`, not on other functions
   |
 2 | fn start() {}
   |    ^^^^^
+  |
+  = help: rename this function to `main`, or remove the attribute

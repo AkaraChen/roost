@@ -1,0 +1,7 @@
+error: missing the constructor arguments of `Dog`
+  --> tests/compile_fail/new_macro_java_syntax.rs:11:19
+   |
+11 |     let _d = new!(Dog);
+   |                   ^^^
+   |
+   = help: write `new!(Dog())`: like Java's `new Dog()`, the parentheses are required even without arguments

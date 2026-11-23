@@ -1,0 +1,7 @@
+error: use `this`, not `self`, in a class
+ --> tests/compile_fail/self_in_method_body.rs:6:38
+  |
+6 |         public fn name() -> String { self.name }
+  |                                      ^^^^
+  |
+  = help: roost methods are written like Java's: `this.field`, `this.method()`

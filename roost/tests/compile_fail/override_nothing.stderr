@@ -1,0 +1,7 @@
+error: method `speek` is marked @Override but does not override or implement a method from a superclass, an interface or `Object`
+ --> tests/compile_fail/override_nothing.rs:9:19
+  |
+9 |         public fn speek() -> String { "woof".to_string() }
+  |                   ^^^^^
+  |
+  = help: did you mean `speak`?

@@ -1,0 +1,7 @@
+error: missing `;` after field `name`
+ --> tests/compile_fail/missing_semicolon_after_field.rs:5:23
+  |
+5 |         private name: String
+  |                       ^^^^^^
+  |
+  = help: as in Java, a field declaration ends with `;`: `name: String;`

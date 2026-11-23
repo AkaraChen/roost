@@ -1,0 +1,7 @@
+error: Java-style field declaration: the type comes after the name
+ --> tests/compile_fail/java_style_field.rs:5:17
+  |
+5 |         private String name;
+  |                 ^^^^^^
+  |
+  = help: write `name: String;`

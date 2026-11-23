@@ -1,0 +1,7 @@
+error: `new!` already means `new`: don't write `new` again inside it
+  --> tests/compile_fail/new_keyword_inside_new_macro.rs:11:19
+   |
+11 |     let _d = new!(new Dog("Rex"));
+   |                   ^^^
+   |
+   = help: Java's `new Dog("Rex")` is `new!(Dog("Rex"))`

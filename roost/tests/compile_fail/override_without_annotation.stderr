@@ -1,0 +1,7 @@
+error: method `speak` overrides `Animal.speak` but is not marked @Override
+ --> tests/compile_fail/override_without_annotation.rs:8:19
+  |
+8 |         public fn speak() -> String { "woof".to_string() }
+  |                   ^^^^^
+  |
+  = help: write `@Override` before the method: roost requires it (Java only recommends it)

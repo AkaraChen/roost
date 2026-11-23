@@ -1,0 +1,7 @@
+error: `super(...)` must be the first statement of a constructor
+  --> tests/compile_fail/super_call_not_first.rs:11:13
+   |
+11 |             super(name);
+   |             ^^^^^
+   |
+   = help: move it to the top of the constructor body, as in Java

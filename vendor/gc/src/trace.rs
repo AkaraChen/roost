@@ -23,6 +23,11 @@ pub trait Finalize {
 }
 
 /// The Trace trait, which needs to be implemented on garbage-collected objects.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not implement `Trace`, so it cannot be stored in a garbage-collected object",
+    label = "not `Trace`",
+    note = "for your own type, add `#[derive(Trace, Finalize)]`; a type that holds no `Gc` pointers can use `#[unsafe_ignore_trace]` on the field instead (in roost: `roost::gc::Trace` / `roost::gc::Finalize`)"
+)]
 pub unsafe trait Trace: Finalize {
     /// Marks all contained `Gc`s.
     unsafe fn trace(&self);

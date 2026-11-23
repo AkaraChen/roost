@@ -5,22 +5,9 @@ error[E0277]: `#[roost::main]` needs `fn main()` or `fn main() -> Result<(), E>`
   |              ^^^ not `Result<(), E>`
   |
   = help: the trait `roost::runtime::MainResult` is not implemented for `i32`
+  = note: to exit with a status code, as Java's `System.exit(code)`, call `std::process::exit(code)`
 help: the trait `roost::runtime::MainResult` is implemented for `Result<(), E>`
  --> $WORKSPACE/roost/src/runtime.rs
   |
-  | impl<E: fmt::Debug> MainResult for Result<(), E> {}
+  | impl<E: fmt::Debug> MainResult for Result<(), E> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `roost::runtime::assert_main_result`
- --> $WORKSPACE/roost/src/runtime.rs
-  |
-  | pub fn assert_main_result<T: MainResult>() {}
-  |                              ^^^^^^^^^^ required by this bound in `assert_main_result`
-
-error[E0308]: mismatched types
- --> tests/ui/wrong_return.rs:2:14
-  |
-2 | fn main() -> i32 {
-  |              ^^^ expected `i32`, found `Result<_, _>`
-  |
-  = note: expected type `i32`
-             found enum `Result<_, _>`

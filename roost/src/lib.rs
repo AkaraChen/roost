@@ -181,15 +181,7 @@ pub use roost_macros::main;
 /// let a = new!(Dog("Rex")) as Ref<Animal>; // upcast: `as` performs the coercion
 /// assert_eq!(a.name(), d.name());
 /// ```
-#[macro_export]
-macro_rules! new {
-    ($($class:ident)::+ ( $($arg:expr),* $(,)? )) => {
-        <$($class)::+>::new($($arg),*)
-    };
-    ($($t:tt)*) => {
-        ::core::compile_error!("expected `new!(ClassName(arguments..))`, e.g. `new!(Dog(\"Rex\"))`")
-    };
-}
+pub use roost_macros::new;
 
 /// `use roost::prelude::*;` brings in what code using classes needs.
 pub mod prelude {
@@ -241,8 +233,97 @@ pub mod __private {
         }
     }
 
-    /// Fails to compile unless `T` can be a field of a GC-managed object.
+    /// The receiver of a method called on a field, `this.items.len()`: a copy of the field
+    /// (see [`get`]). Methods taking `&self` work through `Deref`. There is deliberately no
+    /// `DerefMut`: a `&mut self` method (`this.items.push(x)`) would change the copy and lose
+    /// the change, so it is a compile error, whose message names this type: "cannot borrow
+    /// data in dereference of `ReadOnlyCopyOfField<Vec<String>>` as mutable".
+    pub struct ReadOnlyCopyOfField<T>(pub T);
+
+    impl<T> core::ops::Deref for ReadOnlyCopyOfField<T> {
+        type Target = T;
+        #[inline]
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    /// Fails to compile unless `T` can be a field of a GC-managed object. The one place
+    /// generated code *requires* `T: Trace`, spanned at the field's type: a field type that
+    /// isn't `Trace` is one error, there.
     pub fn assert_trace<T: Trace>() {}
+
+    /// Tracing a field of type `T` without a `T: Trace` bound at the call (see
+    /// [`assert_trace`]): `(&TraceField::<T>::new()).trace_field(cell)` picks [`TraceViaTrace`] when
+    /// `T: Trace` (always, once the program compiles) and [`TraceFallback`] otherwise, so a
+    /// field type that isn't `Trace` doesn't produce one more error per `Trace` method.
+    pub struct TraceField<T>(core::marker::PhantomData<T>);
+
+    impl<T> TraceField<T> {
+        #[allow(clippy::new_without_default)]
+        #[inline]
+        pub fn new() -> Self {
+            TraceField(core::marker::PhantomData)
+        }
+    }
+
+    /// The real thing; see [`TraceField`].
+    pub trait TraceViaTrace<T> {
+        /// # Safety
+        /// As [`Trace::trace`].
+        unsafe fn trace_field(&self, cell: &GcCell<T>);
+        /// # Safety
+        /// As [`Trace::root`].
+        unsafe fn root_field(&self, cell: &GcCell<T>);
+        /// # Safety
+        /// As [`Trace::unroot`].
+        unsafe fn unroot_field(&self, cell: &GcCell<T>);
+        fn finalize_glue_field(&self, cell: &GcCell<T>);
+    }
+
+    impl<T: Trace> TraceViaTrace<T> for TraceField<T> {
+        #[inline]
+        unsafe fn trace_field(&self, cell: &GcCell<T>) {
+            unsafe { Trace::trace(cell) }
+        }
+        #[inline]
+        unsafe fn root_field(&self, cell: &GcCell<T>) {
+            unsafe { Trace::root(cell) }
+        }
+        #[inline]
+        unsafe fn unroot_field(&self, cell: &GcCell<T>) {
+            unsafe { Trace::unroot(cell) }
+        }
+        #[inline]
+        fn finalize_glue_field(&self, cell: &GcCell<T>) {
+            Trace::finalize_glue(cell);
+        }
+    }
+
+    /// Only chosen when `T` is not `Trace`, i.e. when [`assert_trace`] has already failed
+    /// the build; never runs.
+    pub trait TraceFallback<T> {
+        /// # Safety
+        /// Never called.
+        unsafe fn trace_field(&self, _: &GcCell<T>) {
+            unreachable!()
+        }
+        /// # Safety
+        /// Never called.
+        unsafe fn root_field(&self, _: &GcCell<T>) {
+            unreachable!()
+        }
+        /// # Safety
+        /// Never called.
+        unsafe fn unroot_field(&self, _: &GcCell<T>) {
+            unreachable!()
+        }
+        fn finalize_glue_field(&self, _: &GcCell<T>) {
+            unreachable!()
+        }
+    }
+
+    impl<T> TraceFallback<T> for &TraceField<T> {}
 
     /// A field write. The old value is dropped after the borrow has ended.
     #[inline]

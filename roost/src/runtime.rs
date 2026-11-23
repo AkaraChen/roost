@@ -255,15 +255,20 @@ pub trait ReportDebug {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`#[roost::main]` needs `fn main()` or `fn main() -> Result<(), E>` with `E: Debug`, not `-> {Self}`",
-    label = "not `Result<(), E>`"
+    label = "not `Result<(), E>`",
+    note = "to exit with a status code, as Java's `System.exit(code)`, call `std::process::exit(code)`"
 )]
-pub trait MainResult {}
+pub trait MainResult {
+    type Error;
+    fn into_result(self) -> Result<(), Self::Error>;
+}
 
-impl<E: fmt::Debug> MainResult for Result<(), E> {}
-
-/// Compile-time check of `main`'s return type, for a readable error.
-#[doc(hidden)]
-pub fn assert_main_result<T: MainResult>() {}
+impl<E: fmt::Debug> MainResult for Result<(), E> {
+    type Error = E;
+    fn into_result(self) -> Result<(), E> {
+        self
+    }
+}
 
 #[doc(hidden)]
 pub trait ReportBoxedError {

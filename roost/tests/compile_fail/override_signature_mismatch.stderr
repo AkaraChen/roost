@@ -1,0 +1,22 @@
+error[E0053]: method `eat` has an incompatible type for trait
+ --> tests/compile_fail/override_signature_mismatch.rs:9:30
+  |
+3 | class! {
+...
+9 |         public fn eat(grams: f64) -> String { format!("gobbled {grams}g") }
+  |                              ^^^ expected `i32`, found `f64`
+  |
+note: type in trait
+ --> tests/compile_fail/override_signature_mismatch.rs:5:30
+  |
+3 | class! {
+4 |     public class Animal {
+5 |         public fn eat(grams: i32) -> String { format!("ate {grams}g") }
+  |                              ^^^
+  = note: expected signature `fn(&__RoostDog, i32) -> String`
+             found signature `fn(&__RoostDog, f64) -> String`
+help: change the parameter type to match the trait
+  |
+9 -         public fn eat(grams: f64) -> String { format!("gobbled {grams}g") }
+9 +         public fn eat(grams: i32) -> String { format!("gobbled {grams}g") }
+  |

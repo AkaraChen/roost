@@ -1,0 +1,7 @@
+error: field `name` is private to class `Animal`
+ --> tests/compile_fail/private_field_in_subclass.rs:8:43
+  |
+8 |         public fn name() -> String { this.name }
+  |                                           ^^^^
+  |
+  = help: declare it `protected name` in `Animal` to use it in subclasses, as in Java

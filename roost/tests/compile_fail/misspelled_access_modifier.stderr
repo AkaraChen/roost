@@ -1,0 +1,7 @@
+error: unknown modifier `pubilc`
+ --> tests/compile_fail/misspelled_access_modifier.rs:5:9
+  |
+5 |         pubilc fn bark() -> String { "woof".to_string() }
+  |         ^^^^^^
+  |
+  = help: did you mean `public`?
