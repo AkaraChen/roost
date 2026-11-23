@@ -156,7 +156,14 @@ impl<
             // active Box, and we will need to deallocate the Box
             // without calling the destructor, convert it to a raw
             // pointer first.
-            let value = Box::into_raw(value);
+            //
+            // The type annotation is load-bearing (roost patch, see
+            // UPSTREAM.md): without it, nightlies from 2026-08-27 on infer
+            // `Box::into_raw`'s type parameter from the `T: Unsize<dyn Trace>`
+            // bound in scope, i.e. coerce the box to `Box<dyn Trace>`, and
+            // then reject the cast below with E0606 ("casting `*mut dyn
+            // Trace` as `*mut GcBox<T>` is invalid").
+            let value: *mut T = Box::into_raw(value);
 
             // Create a pointer with the metadata of value and the
             // address and provenance of the GcBox.
