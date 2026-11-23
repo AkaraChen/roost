@@ -1,18 +1,36 @@
 //! The five things the spike has to prove, each with assertions.
+//!
+//! This is the first spike (PR #1), kept as a regression suite for the vendored gc. It
+//! deliberately does *not* use roost's runtime (`Ref`, `Object`, ...): it is the raw
+//! `Gc<dyn Trait>` + `macro_rules!` object model the runtime grew out of. Its support
+//! modules live in `tests/spike/` and are shared with `examples/spike.rs`.
+
+// `self: Gc<Self>` receivers (see `gc_methods` in `spike/object.rs`).
+#![feature(arbitrary_self_types)]
+// Only to read vtable pointers in an assertion.
 #![feature(ptr_metadata)]
+
+#[path = "spike/object.rs"]
+#[allow(dead_code)]
+mod object;
+#[path = "spike/probe.rs"]
+mod probe;
+#[path = "spike/zoo.rs"]
+mod zoo;
 
 use std::hint::black_box;
 use std::mem::size_of;
 
-use roost::zoo::{Animal, AnimalBase, Dog, animal_super};
-use roost::{Gc, GcExt, probe};
+use gc::Gc;
+use object::GcExt;
+use zoo::{Animal, AnimalBase, Dog, animal_super};
 
 /// `ROOST_SKIP_COLLECT=1` turns every collection in this file into a no-op. Used to show
 /// that the cycle tests depend on the collector: with it set, they must fail.
 /// (CI runs that and expects failure.)
 fn collect() {
     if std::env::var_os("ROOST_SKIP_COLLECT").is_none() {
-        roost::force_collect();
+        roost::gc::collect();
     }
 }
 

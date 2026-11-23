@@ -1,7 +1,20 @@
-//! `cargo run`: walks through the five things the spike demonstrates.
+//! `cargo run --example spike`: walks through the five things the first spike demonstrates.
+//!
+//! Shares its object model with `tests/spike.rs` (modules in `tests/spike/`).
+#![feature(arbitrary_self_types)]
 
-use roost::zoo::{Animal, AnimalBase, Dog, animal_super};
-use roost::{Gc, GcExt, probe};
+#[path = "../tests/spike/object.rs"]
+#[allow(dead_code)]
+mod object;
+#[path = "../tests/spike/probe.rs"]
+mod probe;
+#[path = "../tests/spike/zoo.rs"]
+#[allow(dead_code)]
+mod zoo;
+
+use gc::Gc;
+use object::GcExt;
+use zoo::{Animal, AnimalBase, Dog, animal_super};
 
 fn main() {
     println!("== 1. inheritance: Dog embeds AnimalBase, referenced as Gc<dyn Animal>");
@@ -71,9 +84,9 @@ fn main() {
         probe::dropped(),
         probe::finalized()
     );
-    roost::force_collect();
+    roost::gc::collect();
     println!(
-        "   after force_collect():           dropped = {}, finalized = {}",
+        "   after roost::gc::collect():      dropped = {}, finalized = {}",
         probe::dropped(),
         probe::finalized()
     );

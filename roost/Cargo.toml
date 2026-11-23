@@ -1,0 +1,10 @@
+[package]
+name = "roost"
+description = "Runtime for a Java-style class DSL on top of a tracing GC."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gc.workspace = true
+roost-macros.workspace = true
