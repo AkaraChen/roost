@@ -2,13 +2,13 @@
 //!
 //! | user writes                | becomes                                                   |
 //! | -------------------------- | --------------------------------------------------------- |
-//! | `this.f` (read)            | `get(this.__roost_field_Owner_f())`: a clone, short borrow |
+//! | `this.f` (read)            | `get(field(this.__roost_field_Owner_f(), "Owner", "f"))`: a clone, short borrow |
 //! | `this.f.m(..)`             | `(&get(..)).m(..)`: `&mut self` methods don't compile      |
-//! | `this.f = e`               | `set(this.__roost_field_Owner_f(), e)`                     |
+//! | `this.f = e`               | `set(field(..), e)`                                       |
 //! | `this.f += e` (any op=)    | `{ let mut v = get(..); v += e; set(.., v) }`              |
 //! | `super.m(a)`               | `<dyn OwnerClass>::__roost_method_m(this, a)`              |
 //! | `this.p(a)`, `p` private   | `<dyn ClassClass>::__roost_private_p(this, a)`             |
-//! | `Self::s` / `Class::s`, `s` a static field | `get_static(&__ROOST_STATIC_Owner_s)` (and `set_static`) |
+//! | `Self::s` / `Class::s`, `s` a static field | `get_static(&__ROOST_STATIC_Owner_s, "Owner", "s")` (and `set_static`) |
 //! | `Dog::f(..)`, `f` a static method inherited from `Animal` | `<dyn AnimalClass>::f(..)` |
 //!
 //! `Owner` is the class that declares `f` / implements `m`, resolved here at expansion time.
@@ -174,12 +174,16 @@ impl Rewriter<'_> {
                 }
                 match self.index.resolve_field(self.class, name) {
                     Ok(f) => {
-                        let accessor = index::accessor_name(&self.index.classes[f.owner], name);
+                        // The names are for runtime error messages (borrow conflicts).
+                        let owner = &self.index.classes[f.owner];
+                        let accessor = index::accessor_name(owner, name);
                         let accessor = Ident::new(&accessor.to_string(), name.span());
+                        let (class, field) = (owner.name.to_string(), name.to_string());
                         Some(Cell {
                             get: quote!(::roost::__private::get),
                             set: quote!(::roost::__private::set),
-                            arg: quote_spanned!(name.span()=> this.#accessor()),
+                            arg: quote_spanned!(name.span()=>
+                                ::roost::__private::field(this.#accessor(), #class, #field)),
                         })
                     }
                     Err(msg) => {
@@ -191,12 +195,14 @@ impl Rewriter<'_> {
             Place::Static { of, .. } => {
                 match self.index.resolve_static_field(self.class, *of, name)? {
                     Ok(f) => {
-                        let key = index::static_name(&self.index.classes[f.owner], name);
+                        let owner = &self.index.classes[f.owner];
+                        let key = index::static_name(owner, name);
                         let key = Ident::new(&key.to_string(), name.span());
+                        let (class, field) = (owner.name.to_string(), name.to_string());
                         Some(Cell {
                             get: quote!(::roost::__private::get_static),
                             set: quote!(::roost::__private::set_static),
-                            arg: quote_spanned!(name.span()=> &#key),
+                            arg: quote_spanned!(name.span()=> &#key, #class, #field),
                         })
                     }
                     Err(msg) => {

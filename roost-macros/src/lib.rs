@@ -1,4 +1,5 @@
-//! Proc macros for roost. Use them through the `roost` crate (`roost::class!`), not directly.
+//! Proc macros for roost. Use them through the `roost` crate (`roost::class!`,
+//! `#[roost::main]`), not directly.
 //!
 //! `class!` takes Java-style class declarations; see the `roost` crate docs and the README
 //! for the language. Layout of this crate:
@@ -6,13 +7,15 @@
 //! * [`model`]: the syntax tree and its parser;
 //! * [`index`]: name resolution (superclass chains, `this.field`, `super.m()`) and checks;
 //! * [`rewrite`]: rewriting `this.field` / `super` in bodies;
-//! * [`expand`]: code generation.
+//! * [`expand`]: code generation;
+//! * [`main_attr`]: `#[roost::main]`, independent of the rest.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
 mod expand;
 mod index;
+mod main_attr;
 mod model;
 mod rewrite;
 
@@ -20,6 +23,15 @@ mod rewrite;
 #[proc_macro]
 pub fn class(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     expand_class(input.into()).into()
+}
+
+/// The program entry point. See the `roost` crate (`roost::main`).
+#[proc_macro_attribute]
+pub fn main(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    main_attr::expand(attr.into(), item.into()).into()
 }
 
 fn expand_class(input: TokenStream) -> TokenStream {
