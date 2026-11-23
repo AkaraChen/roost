@@ -38,7 +38,7 @@ fn parse_size(input: syn::parse::ParseStream<'_>) -> syn::Result<usize> {
             .map_err(|e| syn::Error::new(e.span(), "expected a size such as \"64MB\""))?;
         (lit.value(), lit.span())
     };
-    size_in_bytes(&text).map_err(|msg| syn::Error::new(span, msg))
+    size_in_bytes(&text).map_err(|msg| crate::index::error(span, &msg))
 }
 
 fn size_in_bytes(text: &str) -> Result<usize, String> {
@@ -47,7 +47,9 @@ fn size_in_bytes(text: &str) -> Result<usize, String> {
     let (num, unit) = t.split_at(digits_end);
     let bad = || {
         format!(
-            "invalid size {text:?}: write a number of bytes or a number with a unit, e.g. \"64MB\" (B, KB, MB, GB; powers of 1024)"
+            "invalid size {text:?}{}write a number of bytes or a number with a unit, e.g. \
+             \"64MB\" (B, KB, MB, GB; powers of 1024)",
+            crate::index::HELP
         )
     };
     let n: usize = num.parse().map_err(|_| bad())?;

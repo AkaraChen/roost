@@ -106,6 +106,16 @@ pub struct GcStats {
 }
 
 /// Statistics for the current thread's GC heap.
+///
+/// ```
+/// use roost::prelude::*;
+/// class! { class Node { next: Option<Ref<Node>>; } }
+///
+/// let before = roost::runtime::stats();
+/// let _n = new!(Node());
+/// let after = roost::runtime::stats();
+/// assert_eq!(after.objects_allocated, before.objects_allocated + 1);
+/// ```
 pub fn stats() -> GcStats {
     let s = ::gc::stats();
     GcStats {
@@ -152,7 +162,9 @@ impl fmt::Display for ExceptionKind {
 /// A runtime error raised by roost itself, with the class / field it is about.
 #[derive(Clone, Debug)]
 pub struct Exception {
+    /// What went wrong; printed as `roost.<Kind>`.
     pub kind: ExceptionKind,
+    /// The details, e.g. `field Animal.name cannot be read while it is being written`.
     pub message: String,
 }
 

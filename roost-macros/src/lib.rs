@@ -4,13 +4,13 @@
 //! `class!` takes Java-style class declarations; see the `roost` crate docs and the README
 //! for the language. Layout of this crate:
 //!
-//! * [`model`]: the syntax tree and its parser;
-//! * [`index`]: name resolution (superclass chains, `this.field`, `super.m()`) and checks;
-//! * [`rewrite`]: rewriting `this.field` / `super` in bodies;
-//! * [`expand`]: code generation;
-//! * [`main_attr`]: `#[roost::main]`, independent of the rest;
-//! * [`new_macro`]: `new!(Dog("Rex"))`, Java's `new Dog("Rex")`;
-//! * [`diag`]: error reporting with `help:` lines (nightly `proc_macro::Diagnostic`).
+//! * `model.rs`: the syntax tree and its parser;
+//! * `index.rs`: name resolution (superclass chains, `this.field`, `super.m()`) and checks;
+//! * `rewrite.rs`: rewriting `this.field` / `super` in bodies;
+//! * `expand.rs`: code generation;
+//! * `main_attr.rs`: `#[roost::main]`, independent of the rest;
+//! * `new_macro.rs`: `new!(Dog("Rex"))`, Java's `new Dog("Rex")`;
+//! * `diag.rs`: error reporting with `help:` lines (nightly `proc_macro::Diagnostic`).
 //!
 //! Every error points at the user's tokens; the compile-fail suite
 //! (`roost/tests/compile_fail/`) pins them down.

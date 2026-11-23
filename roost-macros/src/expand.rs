@@ -626,7 +626,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
 
     // `String` parameters are taken as `impl Into<String>` (by `new` and by the constructor
     // body, so `super("Rex")` works too) and converted on entry, so `Dog::new("Rex")` works.
-    // Only `String`: see "构造：`new!` 和构造器参数" in the README for why not every type.
+    // Only `String`: see "构造：`new!` 和构造器参数" in docs/design.md for why not every type.
     let (names, decls) = plain_params(&params);
     let mut ctor_params = Vec::new();
     let mut conversions = Vec::new();

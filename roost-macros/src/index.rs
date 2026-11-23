@@ -153,12 +153,22 @@ impl Index {
                     continue;
                 };
                 if !classes[j].is_interface() {
-                    let msg = if class.is_interface() {
-                        format!("`{name}` is a class: an interface can only extend interfaces")
+                    let e = if class.is_interface() {
+                        syn::Error::new(
+                            name.span(),
+                            format!("`{name}` is a class: an interface can only extend interfaces"),
+                        )
+                        .help(format!(
+                            "turn `{name}` into an `interface`, or remove it from this list"
+                        ))
                     } else {
-                        format!("`{name}` is a class: write `extends {name}`")
+                        syn::Error::new(
+                            name.span(),
+                            format!("`{name}` is a class, not an interface"),
+                        )
+                        .help(format!("as in Java, a class `extends {name}`"))
                     };
-                    errors.push(syn::Error::new(name.span(), msg));
+                    errors.push(e);
                     ok = false;
                     continue;
                 }
@@ -486,18 +496,24 @@ impl Index {
             for &d in &g.decls[1..] {
                 let (m, p, r) = sig(d);
                 if (&p, &r) != (&p0, &r0) {
+                    let (a, b) = (&self.classes[d].name, &self.classes[g.decls[0]].name);
                     let mut e = syn::Error::new(
                         m.name().span(),
                         format!(
-                            "`{}.{}` and `{}.{}` must have the same signature: a class \
+                            "`{a}.{0}` and `{b}.{0}` must have the same signature: a class \
                              implements both with one method",
-                            self.classes[d].name, g.name, self.classes[g.decls[0]].name, g.name
+                            g.name
                         ),
-                    );
+                    )
+                    .help(format!(
+                        "make the parameter and return types of `{a}.{0}` and `{b}.{0}` identical \
+                         (roost does not support Java's covariant return types)",
+                        g.name
+                    ));
                     let first = self.virtual_method(g.decls[0], &g.name).expect("declared");
                     e.combine(syn::Error::new(
                         first.name().span(),
-                        "the other declaration",
+                        format!("the other declaration of `{}`", g.name),
                     ));
                     errors.push(e);
                 }

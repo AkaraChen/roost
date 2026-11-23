@@ -26,6 +26,7 @@ nightly-2026-08-20。放进仓库而不是用 `[patch]` 指向 fork，是为了�
 | 文件 | 改动 |
 | --- | --- |
 | `gc/src/gc.rs` | `GcBox::from_box`：给 `Box::into_raw` 的结果加类型标注，修 E0606 |
+| `gc/src/trace.rs` | `Trace` 加 `#[diagnostic::on_unimplemented]`：字段类型没实现 `Trace` 时的报错说明怎么办（只改报错文字） |
 | `gc_derive/src/lib.rs` | `attr.path` → `attr.path()`（syn 2 API） |
 | `gc_derive/Cargo.toml` | `syn 1` + `synstructure 0.12` → `synstructure 0.13`（syn 2），消掉每个 `#[derive(Trace)]` 都报的 `non_local_definitions` 警告 |
 | `*/Cargo.toml` | 换回上游手写的 manifest（`.crate` 里的 `Cargo.toml.orig`，而不是 cargo 规范化过的那份），`gc_derive` 走路径依赖，加 `publish = false` |

@@ -3,8 +3,10 @@ error: `Book.title` and `Titled.title` must have the same signature: a class imp
   |
 5 |     class Book { public fn title() -> i32 { 1 } }
   |                            ^^^^^
+  |
+  = help: make the parameter and return types of `Book.title` and `Titled.title` identical (roost does not support Java's covariant return types)
 
-error: the other declaration
+error: the other declaration of `title`
  --> tests/compile_fail/conflicting_declarations.rs:4:27
   |
 4 |     interface Titled { fn title() -> String; }

@@ -20,6 +20,7 @@
 #![feature(set_ptr_value)]
 // Unit tests exercise `self: Ref<Self>` methods.
 #![cfg_attr(test, feature(arbitrary_self_types))]
+#![warn(missing_docs)]
 
 // Generated code names `::roost::...`; this makes that path work inside this crate too.
 extern crate self as roost;
@@ -31,6 +32,16 @@ mod reference;
 pub mod runtime;
 #[cfg(test)]
 mod test_classes;
+
+/// The README's examples, compiled and run by `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../../README.md")]
+pub mod readme {}
+
+/// The tutorial's examples (`docs/tutorial.md`), compiled and run by `cargo test --doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/tutorial.md")]
+pub mod tutorial {}
 
 pub use cast::CastRequest;
 pub use object::{AsAny, Object, ObjectClass};
@@ -102,7 +113,7 @@ pub use reference::Ref;
 /// assert_eq!(Base::made(), 1);
 /// ```
 ///
-/// What each piece becomes, and how it differs from Java, is in the README. In short:
+/// What each piece becomes, and how it differs from Java, is in the README (Java → roost table) and docs/design.md. In short:
 /// `Ref<Animal>` is a polymorphic reference (`type Animal = dyn AnimalClass`), methods are
 /// virtual unless `private` or `static`, `this.field` is rewritten into short borrows that
 /// copy values out, and constructors follow Java's order.

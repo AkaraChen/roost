@@ -246,7 +246,7 @@ fn identity_is_ptr_eq() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Evidence for the README: GcCell borrow conflicts.
+// Evidence for docs/design.md (the spike record): GcCell borrow conflicts.
 // ---------------------------------------------------------------------------------------
 
 #[test]

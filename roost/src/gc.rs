@@ -14,7 +14,9 @@ pub use ::gc::{
 };
 
 /// Runs a full collection on the current thread now: every object unreachable from a
-/// root is finalized, then freed.
+/// root is finalized, then freed. Java's `System.gc()`, except that it really runs.
+/// The collector also runs by itself as the heap grows; this is for tests and for
+/// programs that want to free a large structure at a known point.
 ///
 /// # Panics
 ///
@@ -55,6 +57,7 @@ struct Counts {
 pub struct Counter(Rc<Counts>);
 
 impl Counter {
+    /// A counter with no probes yet.
     pub fn new() -> Counter {
         Counter::default()
     }
