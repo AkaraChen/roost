@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["roost", "roost-macros"]
+members = ["roost", "roost-macros", "roost-main-tests"]
 # The vendored gc crates are path dependencies but deliberately *not* members: as members
 # they would be linted with our `clippy -D warnings`. They are treated like third-party
 # code (see vendor/README.md); CI runs their own test suite separately.
@@ -12,5 +12,5 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-gc = { path = "vendor/gc", features = ["derive", "nightly"] }
+gc = { path = "vendor/gc", features = ["derive", "nightly", "unstable-config", "unstable-stats"] }
 roost-macros = { path = "roost-macros" }

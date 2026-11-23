@@ -71,6 +71,29 @@ fn plain_params(params: &[PatType]) -> (Vec<Ident>, Vec<TokenStream>) {
     (names, decls)
 }
 
+/// `String`, `std::string::String` or `alloc::string::String` (optionally with a leading
+/// `::`), by spelling: the macro can't see through aliases or a shadowing `String`.
+fn is_string(ty: &syn::Type) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+    let path = &tp.path;
+    if tp.qself.is_some() || path.segments.iter().any(|s| !s.arguments.is_none()) {
+        return false;
+    }
+    let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    match segs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["String"] => path.leading_colon.is_none(),
+        ["std" | "alloc", "string", "String"] => true,
+        _ => false,
+    }
+}
+
 fn is_doc(a: &Attribute) -> bool {
     a.path().is_ident("doc")
 }
@@ -369,7 +392,31 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         (None, None) => quote!(),
     };
 
+    // `String` parameters are taken as `impl Into<String>` (by `new` and by the constructor
+    // body, so `super("Rex")` works too) and converted on entry, so `Dog::new("Rex")` works.
+    // Only `String`: see "构造：`new!` 和构造器参数" in the README for why not every type.
     let (names, decls) = plain_params(&params);
+    let mut ctor_params = Vec::new();
+    let mut conversions = Vec::new();
+    for (p, n) in params.iter().zip(&names) {
+        let ty = &p.ty;
+        if is_string(ty) {
+            let pat = &p.pat;
+            ctor_params.push(quote_spanned!(ty.span()=> #n: impl ::core::convert::Into<#ty>));
+            conversions.push(quote!(let #pat: #ty = ::core::convert::Into::<#ty>::into(#n);));
+        } else {
+            ctor_params.push(quote!(#p));
+        }
+    }
+    // `new` takes the same parameters, without patterns.
+    let new_decls = params.iter().zip(&names).zip(&decls).map(|((p, n), decl)| {
+        let ty = &p.ty;
+        if is_string(ty) {
+            quote_spanned!(ty.span()=> #n: impl ::core::convert::Into<#ty>)
+        } else {
+            decl.clone()
+        }
+    });
     let stmts = &body.stmts;
     let doc = format!(
         "`new {}(..)`: allocates the object, then runs the constructors.",
@@ -378,8 +425,9 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
     quote! {
         #[doc(hidden)]
         #[allow(clippy::used_underscore_binding)]
-        fn #construct<T: ?Sized + #tr>(this: &T #(, #params)*) {
+        fn #construct<T: ?Sized + #tr>(this: &T #(, #ctor_params)*) {
             let _ = this;
+            #(#conversions)*
             #super_stmt
             #(#stmts)*
         }
@@ -387,7 +435,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
         #[doc = #doc]
         #(#attrs)*
         #[allow(clippy::new_ret_no_self)]
-        #vis fn new(#(#decls),*) -> ::roost::Ref<dyn #tr> {
+        #vis fn new(#(#new_decls),*) -> ::roost::Ref<dyn #tr> {
             // Java order: every field gets its default first, then the constructors run
             // root-first, with `this` already the complete (most-derived) object.
             let object = ::roost::Ref::new(#st::__roost_default());

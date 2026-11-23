@@ -1,0 +1,12 @@
+[package]
+name = "roost-main-tests"
+description = "Tests for `#[roost::main]`: fixture programs run as subprocesses, and trybuild cases."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+roost = { path = "../roost" }
+
+[dev-dependencies]
+trybuild = "1.0"
