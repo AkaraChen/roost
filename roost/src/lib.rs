@@ -259,6 +259,21 @@ pub mod __private {
         }
     }
 
+    /// The receiver is `&ReadOnlyCopyOfField(copy)`, standing in for `&copy`: traits
+    /// implemented for `&T` with a by-value `self` keep working, the one that matters being
+    /// `this.items.into_iter()` (iterates by reference, as `(&items).into_iter()` does).
+    impl<'a, T> IntoIterator for &'a ReadOnlyCopyOfField<T>
+    where
+        &'a T: IntoIterator,
+    {
+        type Item = <&'a T as IntoIterator>::Item;
+        type IntoIter = <&'a T as IntoIterator>::IntoIter;
+        #[inline]
+        fn into_iter(self) -> Self::IntoIter {
+            (&self.0).into_iter()
+        }
+    }
+
     /// Fails to compile unless `T` can be a field of a GC-managed object. The one place
     /// generated code *requires* `T: Trace`, spanned at the field's type: a field type that
     /// isn't `Trace` is one error, there.

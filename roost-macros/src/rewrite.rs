@@ -3,7 +3,7 @@
 //! | user writes                | becomes                                                   |
 //! | -------------------------- | --------------------------------------------------------- |
 //! | `this.f` (read)            | `get(field(this.__roost_field_Owner_f(), "Owner", "f"))`: a clone, short borrow |
-//! | `this.f.m(..)`             | `ReadOnlyCopyOfField(get(..)).m(..)`: `&mut self` methods don't compile |
+//! | `this.f.m(..)`             | `(&ReadOnlyCopyOfField(get(..))).m(..)`: `&mut self` methods don't compile |
 //! | `this.f = e`               | `set(field(..), e)`                                       |
 //! | `this.f += e` (any op=)    | `{ let mut v = get(..); v += e; set(.., v) }`              |
 //! | `super.m(a)`               | `<dyn OwnerClass>::__roost_method_m(this, a)`              |
@@ -317,7 +317,7 @@ impl Rewriter<'_> {
             let rspan = call.receiver.span();
             let read = self.read(&place, rspan);
             *call.receiver =
-                parse_quote_spanned!(rspan=> ::roost::__private::ReadOnlyCopyOfField(#read));
+                parse_quote_spanned!(rspan=> (&::roost::__private::ReadOnlyCopyOfField(#read)));
             return None;
         }
         visit_mut::visit_expr_method_call_mut(self, call);

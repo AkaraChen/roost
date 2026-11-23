@@ -355,3 +355,30 @@ fn a_method_declared_by_a_superclass_and_by_interfaces() {
     assert_eq!(q.title(), "Dune Messiah");
     assert_eq!(q.both(), "Dune Messiah ** Dune Messiah **");
 }
+
+#[test]
+fn methods_called_on_a_field_see_a_copy() {
+    // `this.f.m()` calls `m` on a read-only copy of the field: `&self` methods, by-value
+    // methods of `Copy` types, and `into_iter()` (by reference, like `(&v).into_iter()`)
+    // all work; `&mut self` methods are a compile error (compile_fail/mutating_method_on_field).
+    class! {
+        class Kennel {
+            dogs: Vec<String>;
+            best: Option<i32>;
+            public Kennel() { this.dogs = vec!["Rex".to_string(), "Ace".to_string()]; }
+            public fn letters() -> usize {
+                let mut n = 0;
+                for d in this.dogs.into_iter() {
+                    n += d.len();
+                }
+                n
+            }
+            public fn summary() -> String {
+                format!("{} dogs, best {}", this.dogs.len(), this.best.map_or(0, |b| b + 1))
+            }
+        }
+    }
+    let k = new!(Kennel());
+    assert_eq!(k.letters(), 6);
+    assert_eq!(k.summary(), "2 dogs, best 0");
+}
