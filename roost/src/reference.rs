@@ -42,6 +42,16 @@ impl<T: ?Sized> Ref<T> {
         this.0
     }
 
+    /// An explicit upcast: `Dog::new(..).upcast::<Animal>()`. Same as the implicit
+    /// coercion (`let a: Ref<Animal> = dog;`), for places where no type is expected.
+    /// (A `From` impl for this would overlap with `impl<T> From<T> for T`.)
+    pub fn upcast<U: ?Sized>(self) -> Ref<U>
+    where
+        T: Unsize<U>,
+    {
+        self
+    }
+
     /// Java's `a == b` on references: do both point to the same object?
     ///
     /// The two sides may have different static types (`Ref<Dog>` vs `Ref<dyn Animal>`):
@@ -59,6 +69,11 @@ impl<T: ?Sized + Object> Ref<T> {
     /// (`dyn Dog`); `true` for subclasses too.
     pub fn instance_of<U: ?Sized + 'static>(&self) -> bool {
         self.lookup::<U>().is_some()
+    }
+
+    /// Same as [`instance_of`](Ref::instance_of), spelled like Java's operator.
+    pub fn instanceof<U: ?Sized + 'static>(&self) -> bool {
+        self.instance_of::<U>()
     }
 
     /// Java's `(U) x`, checked: the same object as a `Ref<U>`, or `None` if it isn't one.
