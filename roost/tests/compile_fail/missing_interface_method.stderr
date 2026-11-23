@@ -1,0 +1,5 @@
+error: class `Dog` is not abstract and does not implement `Pet.owner`: implement it (with @Override) or declare the class `abstract`
+  --> tests/compile_fail/missing_interface_method.rs:10:11
+   |
+10 |     class Dog implements Pet {
+   |           ^^^

@@ -10,9 +10,9 @@
 //! ```
 
 use crate::gc::{Finalize, GcCell, Probe, Trace};
-use crate::{CastRequest, Object, Ref};
+use crate::{CastRequest, Object, ObjectClass, Ref};
 
-pub trait Animal: Object {
+pub trait Animal: ObjectClass {
     fn name(&self) -> String;
 
     fn speak(&self) -> String {
@@ -77,11 +77,11 @@ pub fn cat(name: &str) -> Ref<Cat> {
     Ref::new(Cat { name: name.into() })
 }
 
-impl Object for PlainAnimal {
+impl ObjectClass for PlainAnimal {
     fn __roost_casts(&self, req: &mut CastRequest<'_>) {
         req.offer_class(self)
             .offer::<dyn Animal, _>(self)
-            .offer::<dyn Object, _>(self);
+            .offer::<Object, _>(self);
     }
 }
 impl Animal for PlainAnimal {
@@ -90,12 +90,12 @@ impl Animal for PlainAnimal {
     }
 }
 
-impl Object for Mutt {
+impl ObjectClass for Mutt {
     fn __roost_casts(&self, req: &mut CastRequest<'_>) {
         req.offer_class(self)
             .offer::<dyn Dog, _>(self)
             .offer::<dyn Animal, _>(self)
-            .offer::<dyn Object, _>(self);
+            .offer::<Object, _>(self);
     }
 }
 impl Animal for Mutt {
@@ -108,12 +108,12 @@ impl Animal for Mutt {
 }
 impl Dog for Mutt {}
 
-impl Object for Puppy {
+impl ObjectClass for Puppy {
     fn __roost_casts(&self, req: &mut CastRequest<'_>) {
         req.offer_class(self)
             .offer::<dyn Dog, _>(self)
             .offer::<dyn Animal, _>(self)
-            .offer::<dyn Object, _>(self);
+            .offer::<Object, _>(self);
     }
 }
 impl Animal for Puppy {
@@ -130,11 +130,11 @@ impl Dog for Puppy {
     }
 }
 
-impl Object for Cat {
+impl ObjectClass for Cat {
     fn __roost_casts(&self, req: &mut CastRequest<'_>) {
         req.offer_class(self)
             .offer::<dyn Animal, _>(self)
-            .offer::<dyn Object, _>(self);
+            .offer::<Object, _>(self);
     }
     fn class_name(&self) -> &'static str {
         "Cat"

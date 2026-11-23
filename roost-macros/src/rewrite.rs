@@ -8,6 +8,8 @@
 //! | `this.f += e` (any op=)    | `{ let mut v = get(..); v += e; set(.., v) }`              |
 //! | `super.m(a)`               | `<dyn OwnerClass>::__roost_method_m(this, a)`              |
 //! | `this.p(a)`, `p` private   | `<dyn ClassClass>::__roost_private_p(this, a)`             |
+//! | `Self::s` / `Class::s`, `s` a static field | `get_static(&__ROOST_STATIC_Owner_s)` (and `set_static`) |
+//! | `Dog::f(..)`, `f` a static method inherited from `Animal` | `<dyn AnimalClass>::f(..)` |
 //!
 //! `Owner` is the class that declares `f` / implements `m`, resolved here at expansion time.
 //! No `GcCell` guard ever outlives the helper call, so a virtual call can never run while a
@@ -16,18 +18,51 @@
 //! rewritten too when they parse as expressions; otherwise only field reads are.
 
 use proc_macro2::{Delimiter, Group, Span, TokenStream, TokenTree};
-use quote::{ToTokens, quote_spanned};
+use quote::{ToTokens, quote, quote_spanned};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit_mut::{self, VisitMut};
 use syn::{BinOp, Expr, ExprMethodCall, Ident, Member, Token, parse_quote_spanned};
 
-use crate::index::{self, Index};
+use crate::index::{self, Impl, Index};
 
 pub struct Rewriter<'a> {
     pub index: &'a Index,
     pub class: usize,
+    /// `false` in static methods.
+    pub has_this: bool,
     pub errors: &'a mut Vec<syn::Error>,
+}
+
+/// A field as an assignable place.
+enum Place {
+    /// `this.f`
+    This(Ident),
+    /// `Class::f` / `Self::f`, a static field of class `of` (or of one of its ancestors).
+    Static { of: usize, name: Ident },
+}
+
+impl Place {
+    fn name(&self) -> &Ident {
+        match self {
+            Place::This(n) | Place::Static { name: n, .. } => n,
+        }
+    }
+
+    /// How the user wrote it, for messages.
+    fn display(&self, index: &Index) -> String {
+        match self {
+            Place::This(n) => format!("this.{n}"),
+            Place::Static { of, name } => format!("{}::{name}", index.classes[*of].name),
+        }
+    }
+}
+
+/// A resolved field: read with `get(arg)`, write with `set(arg, value)`.
+struct Cell {
+    get: TokenStream,
+    set: TokenStream,
+    arg: TokenStream,
 }
 
 /// `this.f` -> `f`.
@@ -37,17 +72,6 @@ fn this_field(e: &Expr) -> Option<&Ident> {
         return None;
     };
     is_path(&f.base, "this").then_some(name)
-}
-
-/// The root of a place expression (`this.f.g[0]` -> `this.f`), if it is `this.f`.
-fn place_root_field(e: &Expr) -> Option<&Ident> {
-    match e {
-        Expr::Field(f) => this_field(e).or_else(|| place_root_field(&f.base)),
-        Expr::Index(i) => place_root_field(&i.expr),
-        Expr::Paren(p) => place_root_field(&p.expr),
-        Expr::Unary(u) => place_root_field(&u.expr),
-        _ => None,
-    }
 }
 
 fn is_path(e: &Expr, name: &str) -> bool {
@@ -66,6 +90,17 @@ fn is_super(e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `A::b` (no generics, no leading `::`) -> `(A, b)`.
+fn two_segment_path(e: &Expr) -> Option<(&Ident, &Ident)> {
+    let Expr::Path(p) = e else { return None };
+    let segs = &p.path.segments;
+    (p.qself.is_none()
+        && p.path.leading_colon.is_none()
+        && segs.len() == 2
+        && segs.iter().all(|s| s.arguments.is_none()))
+    .then(|| (&segs[0].ident, &segs[1].ident))
 }
 
 fn compound_to_plain(op: &BinOp) -> bool {
@@ -89,24 +124,93 @@ impl Rewriter<'_> {
         self.errors.push(syn::Error::new(span, msg));
     }
 
-    /// `this.__roost_field_Owner_f()`, or `None` (error recorded) if `f` doesn't resolve.
-    fn cell(&mut self, name: &Ident) -> Option<TokenStream> {
-        match self.index.resolve_field(self.class, name) {
-            Ok(f) => {
-                let accessor = index::accessor_name(&self.index.classes[f.owner], name);
-                let accessor = Ident::new(&accessor.to_string(), name.span());
-                Some(quote_spanned!(name.span()=> this.#accessor()))
+    /// The class a path's first segment names: `Self` or a class of this block.
+    fn path_class(&self, first: &Ident) -> Option<usize> {
+        if first == "Self" {
+            Some(self.class)
+        } else {
+            self.index
+                .find(first)
+                .filter(|&c| !self.index.classes[c].is_interface())
+        }
+    }
+
+    /// `this.f`, or `Class::f` / `Self::f` naming a static field.
+    fn place(&self, e: &Expr) -> Option<Place> {
+        if let Some(name) = this_field(e) {
+            return Some(Place::This(name.clone()));
+        }
+        let (first, name) = two_segment_path(e)?;
+        let of = self.path_class(first)?;
+        let _found = self.index.resolve_static_field(self.class, of, name)?;
+        Some(Place::Static {
+            of,
+            name: name.clone(),
+        })
+    }
+
+    /// The root of a place expression (`this.f.g[0]` -> `this.f`), if it is a field.
+    fn place_root(&self, e: &Expr) -> Option<Place> {
+        if let Some(p) = self.place(e) {
+            return Some(p);
+        }
+        match e {
+            Expr::Field(f) => self.place_root(&f.base),
+            Expr::Index(i) => self.place_root(&i.expr),
+            Expr::Paren(p) => self.place_root(&p.expr),
+            Expr::Unary(u) => self.place_root(&u.expr),
+            _ => None,
+        }
+    }
+
+    /// How to read and write a place. `None` (error recorded) if it doesn't resolve.
+    fn cell(&mut self, place: &Place) -> Option<Cell> {
+        let name = place.name();
+        match place {
+            Place::This(_) => {
+                if !self.has_this {
+                    self.error(name.span(), "there is no `this` in a static method");
+                    return None;
+                }
+                match self.index.resolve_field(self.class, name) {
+                    Ok(f) => {
+                        let accessor = index::accessor_name(&self.index.classes[f.owner], name);
+                        let accessor = Ident::new(&accessor.to_string(), name.span());
+                        Some(Cell {
+                            get: quote!(::roost::__private::get),
+                            set: quote!(::roost::__private::set),
+                            arg: quote_spanned!(name.span()=> this.#accessor()),
+                        })
+                    }
+                    Err(msg) => {
+                        self.error(name.span(), msg);
+                        None
+                    }
+                }
             }
-            Err(msg) => {
-                self.error(name.span(), msg);
-                None
+            Place::Static { of, .. } => {
+                match self.index.resolve_static_field(self.class, *of, name)? {
+                    Ok(f) => {
+                        let key = index::static_name(&self.index.classes[f.owner], name);
+                        let key = Ident::new(&key.to_string(), name.span());
+                        Some(Cell {
+                            get: quote!(::roost::__private::get_static),
+                            set: quote!(::roost::__private::set_static),
+                            arg: quote_spanned!(name.span()=> &#key),
+                        })
+                    }
+                    Err(msg) => {
+                        self.error(name.span(), msg);
+                        None
+                    }
+                }
             }
         }
     }
 
-    fn read(&mut self, name: &Ident, span: Span) -> Expr {
-        match self.cell(name) {
-            Some(cell) => parse_quote_spanned!(span=> ::roost::__private::get(#cell)),
+    fn read(&mut self, place: &Place, span: Span) -> Expr {
+        match self.cell(place) {
+            Some(Cell { get, arg, .. }) => parse_quote_spanned!(span=> #get(#arg)),
             None => parse_quote_spanned!(span=> ::core::unreachable!()),
         }
     }
@@ -117,30 +221,63 @@ impl Rewriter<'_> {
         }
     }
 
-    fn rewrite_method_call(&mut self, call: &mut ExprMethodCall) -> Option<Expr> {
+    fn super_call(&mut self, call: &mut ExprMethodCall) -> Option<Expr> {
         let span = call.span();
         let method = call.method.clone();
-        if is_super(&call.receiver) {
-            self.visit_args(call);
-            let Some(parent) = self.index.parent(self.class) else {
+        self.visit_args(call);
+        let is_object_method = index::OBJECT_METHODS.iter().any(|o| method == o);
+        let resolved = match self.index.parent(self.class) {
+            Some(parent) => self.index.resolve_impl(parent, &method),
+            // The superclass is `Object`.
+            None if is_object_method && !self.index.classes[self.class].is_interface() => {
+                Some(Impl::Object)
+            }
+            None => {
                 self.error(
                     call.receiver.span(),
                     "`super` method call in a class without a superclass",
                 );
                 return None;
-            };
-            let Some(owner) = self.index.resolve_virtual(parent, &method) else {
-                self.error(
-                    method.span(),
-                    format!("no method `{method}` in any superclass"),
-                );
+            }
+        };
+        let f = index::method_impl_name(&method);
+        let f = Ident::new(&f.to_string(), method.span());
+        let args = &call.args;
+        let tr = |t: usize| index::trait_name(&self.index.classes[t]);
+        Some(match resolved {
+            Some(Impl::Class(k) | Impl::Default(k)) => {
+                let tr = tr(k);
+                parse_quote_spanned!(span=> <dyn #tr>::#f(this, #args))
+            }
+            Some(Impl::Object) => {
+                let default = match method.to_string().as_str() {
+                    "to_string" => quote!(default_to_string),
+                    "hash_code" => quote!(identity_hash_code),
+                    _ => quote!(identity_equals),
+                };
+                let args = args.iter().map(|a| quote!(&#a));
+                parse_quote_spanned!(span=> ::roost::__private::#default(this #(, #args)*))
+            }
+            None => {
+                let parent = self.index.parent(self.class).expect("handled above");
+                let msg = match self.index.resolve_virtual(parent, &method) {
+                    Some(owner) => format!(
+                        "`{}.{method}` is abstract: it cannot be called with `super`",
+                        self.index.classes[owner].name
+                    ),
+                    None => format!("no method `{method}` in any superclass"),
+                };
+                self.error(method.span(), msg);
                 return None;
-            };
-            let tr = index::trait_name(&self.index.classes[owner]);
-            let f = index::method_impl_name(&method);
-            let f = Ident::new(&f.to_string(), method.span());
-            let args = &call.args;
-            return Some(parse_quote_spanned!(span=> <dyn #tr>::#f(this, #args)));
+            }
+        })
+    }
+
+    fn rewrite_method_call(&mut self, call: &mut ExprMethodCall) -> Option<Expr> {
+        let span = call.span();
+        let method = call.method.clone();
+        if is_super(&call.receiver) {
+            return self.super_call(call);
         }
         if is_path(&call.receiver, "this")
             && self.index.private_method(self.class, &method).is_some()
@@ -152,17 +289,30 @@ impl Rewriter<'_> {
             let args = &call.args;
             return Some(parse_quote_spanned!(span=> <dyn #tr>::#f(this, #args)));
         }
-        if let Some(name) = this_field(&call.receiver).cloned() {
+        if let Some(place) = self.place(&call.receiver) {
             // A method called on a field operates on a *copy*. Make the copy immutable, so a
             // `&mut self` method (`this.items.push(x)`) is a compile error instead of a
             // silently lost update.
             self.visit_args(call);
-            let read = self.read(&name, call.receiver.span());
+            let read = self.read(&place, call.receiver.span());
             *call.receiver = parse_quote_spanned!(call.receiver.span()=> (&#read));
             return None;
         }
         visit_mut::visit_expr_method_call_mut(self, call);
         None
+    }
+
+    /// `Dog::f` where `f` is a static method `Dog` inherits from `Animal`: the inherent
+    /// function lives on `dyn AnimalClass`, so name that.
+    fn inherited_static(&self, e: &Expr) -> Option<Expr> {
+        let (first, name) = two_segment_path(e)?;
+        let of = self.path_class(first)?;
+        let owner = self.index.resolve_static_method(of, name)?;
+        if owner == of {
+            return None;
+        }
+        let tr = index::trait_name(&self.index.classes[owner]);
+        Some(parse_quote_spanned!(e.span()=> <dyn #tr>::#name))
     }
 
     /// Token-level fallback for macro arguments that don't parse as expressions: rewrites
@@ -182,7 +332,7 @@ impl Rewriter<'_> {
                 && !matches!(trees.get(i + 3), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis)
                 && !matches!(trees.get(i + 3), Some(TokenTree::Punct(p)) if p.as_char() == ':')
             {
-                let read = self.read(name, name.span());
+                let read = self.read(&Place::This(name.clone()), name.span());
                 out.push(TokenTree::Group(Group::new(
                     Delimiter::Parenthesis,
                     read.into_token_stream(),
@@ -209,17 +359,18 @@ impl VisitMut for Rewriter<'_> {
         let span = e.span();
         let replacement: Option<Expr> = match e {
             Expr::Assign(a) => {
-                if let Some(name) = this_field(&a.left).cloned() {
+                if let Some(place) = self.place(&a.left) {
                     self.visit_expr_mut(&mut a.right);
                     let right = &a.right;
-                    self.cell(&name).map(
-                        |cell| parse_quote_spanned!(span=> ::roost::__private::set(#cell, #right)),
+                    self.cell(&place).map(
+                        |Cell { set, arg, .. }| parse_quote_spanned!(span=> #set(#arg, #right)),
                     )
-                } else if let Some(name) = place_root_field(&a.left) {
+                } else if let Some(place) = self.place_root(&a.left) {
+                    let p = place.display(self.index);
                     let msg = format!(
-                        "cannot assign into a part of field `{name}`: `this.{name}` is read as a \
-                         copy. Read it into a local, change that, then write it back with \
-                         `this.{name} = ...`"
+                        "cannot assign into a part of field `{}`: `{p}` is read as a copy. Read \
+                         it into a local, change that, then write it back with `{p} = ...`",
+                        place.name()
                     );
                     self.error(a.left.span(), msg);
                     None
@@ -229,21 +380,23 @@ impl VisitMut for Rewriter<'_> {
                 }
             }
             Expr::Binary(b) if compound_to_plain(&b.op) => {
-                if let Some(name) = this_field(&b.left).cloned() {
+                if let Some(place) = self.place(&b.left) {
                     self.visit_expr_mut(&mut b.right);
                     let (op, right) = (&b.op, &b.right);
                     // Java order: read the field, evaluate the right side, write back.
-                    self.cell(&name).map(|cell| {
+                    self.cell(&place).map(|Cell { get, set, arg }| {
                         parse_quote_spanned!(span=> {
-                            let mut __roost_value = ::roost::__private::get(#cell);
+                            let mut __roost_value = #get(#arg);
                             __roost_value #op #right;
-                            ::roost::__private::set(#cell, __roost_value)
+                            #set(#arg, __roost_value)
                         })
                     })
-                } else if let Some(name) = place_root_field(&b.left) {
+                } else if let Some(place) = self.place_root(&b.left) {
+                    let p = place.display(self.index);
                     let msg = format!(
-                        "cannot update a part of field `{name}` in place: read it into a local, \
-                         change that, then write it back with `this.{name} = ...`"
+                        "cannot update a part of field `{}` in place: read it into a local, \
+                         change that, then write it back with `{p} = ...`",
+                        place.name()
                     );
                     self.error(b.left.span(), msg);
                     None
@@ -252,17 +405,29 @@ impl VisitMut for Rewriter<'_> {
                     None
                 }
             }
-            Expr::Reference(r) if r.mutability.is_some() && place_root_field(&r.expr).is_some() => {
+            Expr::Reference(r) if r.mutability.is_some() && self.place_root(&r.expr).is_some() => {
                 self.error(
                     r.span(),
                     "cannot take `&mut` of a field: fields are read as copies",
                 );
                 None
             }
-            Expr::Field(_) if this_field(e).is_some() => {
-                let name = this_field(e).cloned().unwrap();
-                Some(self.read(&name, span))
+            Expr::Call(c) if two_segment_path(&c.func).is_some() => {
+                // `Class::f(..)` calls a static method, even if a static field is also
+                // called `f` (Java keeps fields and methods apart, so do we).
+                if let Some(func) = self.inherited_static(&c.func) {
+                    *c.func = func;
+                }
+                for arg in c.args.iter_mut() {
+                    self.visit_expr_mut(arg);
+                }
+                None
             }
+            Expr::Field(_) | Expr::Path(_) if self.place(e).is_some() => {
+                let place = self.place(e).unwrap();
+                Some(self.read(&place, span))
+            }
+            Expr::Path(_) if self.inherited_static(e).is_some() => self.inherited_static(e),
             Expr::MethodCall(call) => self.rewrite_method_call(call),
             Expr::Call(c) if is_super(&c.func) => {
                 self.error(

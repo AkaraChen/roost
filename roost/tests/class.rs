@@ -345,7 +345,7 @@ fn instanceof_and_cast() {
     let up: Ref<Animal> = as_puppy.clone();
     assert!(Ref::ptr_eq(&up, puppy));
     assert!(as_puppy.cast::<Animal>().is_some());
-    let o: Ref<dyn Object> = as_puppy;
+    let o: Ref<Object> = as_puppy;
     assert_eq!(o.class_name(), "Puppy");
     assert!(o.cast::<Dog>().is_some());
 }

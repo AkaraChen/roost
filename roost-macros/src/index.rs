@@ -1,31 +1,68 @@
-//! Name resolution over a parsed [`Hierarchy`]: superclass chains, which class a
-//! `this.field` / `super.m()` refers to, and the semantic checks (`@Override`, ...).
+//! Name resolution over a parsed [`Hierarchy`]: superclass chains, implemented interfaces,
+//! which class a `this.field` / `super.m()` refers to, which implementation each method of
+//! each concrete class uses, and the semantic checks (`@Override`, abstract, final, ...).
+//!
+//! Classes and interfaces share one list (`Index::classes`); an interface is a `Class` with
+//! `kind == Interface`, no fields and no superclass.
+
+use std::collections::BTreeMap;
 
 use proc_macro2::Span;
-use quote::format_ident;
+use quote::{ToTokens, format_ident};
 use syn::Ident;
 
 use crate::model::{Access, Class, Hierarchy, Method};
 
-/// Methods every object already has (from `roost::Object`). Overriding them is a later step.
-const OBJECT_METHODS: &[&str] = &[
-    "to_string",
-    "equals",
-    "hash_code",
-    "class_name",
-    "as_any",
-    "new",
-];
+/// Names that can't be methods: other `roost::ObjectClass` methods, and the constructor.
+const RESERVED: &[&str] = &["class_name", "as_any", "new"];
+
+/// `java.lang.Object` methods a class may override (with `@Override`).
+pub const OBJECT_METHODS: &[&str] = &["to_string", "equals", "hash_code"];
 
 pub struct Index {
     pub classes: Vec<Class>,
-    /// `chains[i]`: class `i`, its parent, ..., the root (indices into `classes`).
+    /// `chains[i]`: class `i`, its parent, ..., the root (indices into `classes`). For an
+    /// interface, just `[i]`.
     pub chains: Vec<Vec<usize>>,
+    /// `ifaces[i]`: every interface class `i` implements, directly or through its
+    /// superclasses or super-interfaces, without duplicates. For an interface: its
+    /// super-interfaces (not itself).
+    pub ifaces: Vec<Vec<usize>>,
+    pub shared: Vec<Shared>,
+}
+
+/// A method declared by several related types: say class `Book` declares `title()` and
+/// `Novel extends Book implements Titled`, where interface `Titled` declares it too. If
+/// `BookClass` and `TitledInterface` both declared `title`, `novel.title()` would be
+/// ambiguous (E0034) and no inherent method can fix that for a trait object. So the
+/// method goes into one trait of its own, `__RoostBook_title`, which both have as a
+/// supertrait instead: reached along two paths, it is still one method.
+pub struct Shared {
+    pub name: Ident,
+    /// The declaring types (indices into `classes`), sorted.
+    pub decls: Vec<usize>,
 }
 
 /// A field as seen from some class: who declares it.
 pub struct FieldRef {
     pub owner: usize,
+}
+
+/// Where the method a class's vtable entry runs comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Impl {
+    /// The body declared in this class.
+    Class(usize),
+    /// A `default` method of this interface.
+    Default(usize),
+    /// `roost::ObjectClass`'s default (`to_string`, `equals`, `hash_code`).
+    Object,
+}
+
+/// Where a method an override refers to is declared.
+enum Above {
+    Type(usize),
+    Object,
 }
 
 impl Index {
@@ -34,35 +71,49 @@ impl Index {
         let mut ok = true;
         for (i, c) in classes.iter().enumerate() {
             if let Some(prev) = classes[..i].iter().find(|p| p.name == c.name) {
-                let mut e = syn::Error::new(
-                    c.name.span(),
-                    format!("class `{}` is declared twice", c.name),
-                );
+                let mut e =
+                    syn::Error::new(c.name.span(), format!("`{}` is declared twice", c.name));
                 e.combine(syn::Error::new(prev.name.span(), "first declared here"));
                 errors.push(e);
                 ok = false;
             }
         }
+        let find = |name: &Ident, errors: &mut Vec<syn::Error>, what: &str| {
+            let found = classes.iter().position(|c| c.name == *name);
+            if found.is_none() {
+                errors.push(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "unknown {what} `{name}`: it must be declared in the same `class!` block \
+                         (a current limitation of roost)"
+                    ),
+                ));
+            }
+            found
+        };
+
+        // Superclass chains.
         let mut chains = Vec::new();
-        for (i, _) in classes.iter().enumerate() {
+        for (i, class) in classes.iter().enumerate() {
             let mut chain = vec![i];
             let mut cur = i;
             while let Some(parent) = &classes[cur].parent {
-                let Some(p) = classes.iter().position(|c| c.name == *parent) else {
-                    errors.push(syn::Error::new(
-                        parent.span(),
-                        format!(
-                            "unknown superclass `{parent}`: the superclass must be declared in the same \
-                             `class!` block (a current limitation of roost)"
-                        ),
-                    ));
+                let Some(p) = find(parent, errors, "superclass") else {
                     ok = false;
                     break;
                 };
+                if classes[p].is_interface() {
+                    errors.push(syn::Error::new(
+                        parent.span(),
+                        format!("`{parent}` is an interface: write `implements {parent}`"),
+                    ));
+                    ok = false;
+                    break;
+                }
                 if chain.contains(&p) {
                     errors.push(syn::Error::new(
-                        classes[i].name.span(),
-                        format!("cyclic inheritance involving `{}`", classes[i].name),
+                        class.name.span(),
+                        format!("cyclic inheritance involving `{}`", class.name),
                     ));
                     ok = false;
                     break;
@@ -72,10 +123,78 @@ impl Index {
             }
             chains.push(chain);
         }
+
+        // Direct interface lists.
+        let mut direct: Vec<Vec<usize>> = Vec::new();
+        for class in &classes {
+            let mut list = Vec::new();
+            for name in &class.interfaces {
+                let Some(j) = find(name, errors, "interface") else {
+                    ok = false;
+                    continue;
+                };
+                if !classes[j].is_interface() {
+                    let msg = if class.is_interface() {
+                        format!("`{name}` is a class: an interface can only extend interfaces")
+                    } else {
+                        format!("`{name}` is a class: write `extends {name}`")
+                    };
+                    errors.push(syn::Error::new(name.span(), msg));
+                    ok = false;
+                    continue;
+                }
+                if list.contains(&j) {
+                    errors.push(syn::Error::new(
+                        name.span(),
+                        format!("`{name}` is listed twice"),
+                    ));
+                    ok = false;
+                    continue;
+                }
+                list.push(j);
+            }
+            direct.push(list);
+        }
         if !ok {
             return None;
         }
-        let index = Index { classes, chains };
+
+        // Interface closures (and cycles among interfaces).
+        let mut ifaces = Vec::new();
+        for (i, class) in classes.iter().enumerate() {
+            let mut out: Vec<usize> = Vec::new();
+            let mut stack: Vec<usize> = chains[i].iter().flat_map(|&c| direct[c].clone()).collect();
+            stack.reverse();
+            while let Some(j) = stack.pop() {
+                if j == i {
+                    errors.push(syn::Error::new(
+                        class.name.span(),
+                        format!("cyclic inheritance involving `{}`", class.name),
+                    ));
+                    ok = false;
+                    break;
+                }
+                if !out.contains(&j) {
+                    out.push(j);
+                    stack.extend(direct[j].iter().rev());
+                }
+            }
+            ifaces.push(out);
+        }
+        if !ok {
+            return None;
+        }
+
+        let mut index = Index {
+            classes,
+            chains,
+            ifaces,
+            shared: Vec::new(),
+        };
+        let shared = Self::shared_groups(&index.classes, &index.chains, &index.ifaces, |t, m| {
+            index.introduces(t, m)
+        });
+        index.shared = shared;
         index.check(errors);
         Some(index)
     }
@@ -84,29 +203,149 @@ impl Index {
         self.chains[class].get(1).copied()
     }
 
-    /// The class (starting at `from` and going up) whose virtual method `name` is in effect.
-    pub fn resolve_virtual(&self, from: usize, name: &Ident) -> Option<usize> {
-        self.chains[from].iter().copied().find(|&c| {
-            self.classes[c]
-                .methods
-                .iter()
-                .any(|m| m.is_virtual() && m.name() == name)
-        })
+    /// Every class trait and interface trait type `t`'s trait has as a (transitive)
+    /// supertrait, `t` included: its chain, then its interfaces.
+    pub fn supertypes(&self, t: usize) -> impl Iterator<Item = usize> + '_ {
+        self.chains[t].iter().chain(&self.ifaces[t]).copied()
     }
 
-    /// Does `class` introduce `m` (as opposed to overriding an inherited method)?
-    pub fn introduces(&self, class: usize, m: &Method) -> bool {
+    /// The virtual method `name` declared (abstract or not) in type `t` itself.
+    pub fn virtual_method(&self, t: usize, name: &Ident) -> Option<&Method> {
+        self.classes[t]
+            .methods
+            .iter()
+            .find(|m| m.is_virtual() && m.name() == name)
+    }
+
+    /// The class (starting at `from` and going up) that declares virtual method `name`.
+    pub fn resolve_virtual(&self, from: usize, name: &Ident) -> Option<usize> {
+        self.chains[from]
+            .iter()
+            .copied()
+            .find(|&c| self.virtual_method(c, name).is_some())
+    }
+
+    /// Where `name` is declared for an override in class `c`: a superclass, an interface
+    /// `c` implements, or `Object`.
+    fn declared_above(&self, c: usize, name: &Ident) -> Option<Above> {
+        if let Some(p) = self.parent(c)
+            && let Some(owner) = self.resolve_virtual(p, name)
+        {
+            return Some(Above::Type(owner));
+        }
+        if let Some(&i) = self.ifaces[c]
+            .iter()
+            .find(|&&i| self.virtual_method(i, name).is_some())
+        {
+            return Some(Above::Type(i));
+        }
+        OBJECT_METHODS
+            .iter()
+            .any(|o| name == o)
+            .then_some(Above::Object)
+    }
+
+    /// Does `t`'s trait declare `m` (as opposed to `m` overriding or implementing a method
+    /// declared further up)?
+    pub fn introduces(&self, t: usize, m: &Method) -> bool {
         m.is_virtual()
-            && self
-                .parent(class)
-                .is_none_or(|p| self.resolve_virtual(p, m.name()).is_none())
+            && (self.classes[t].is_interface() || self.declared_above(t, m.name()).is_none())
+    }
+
+    /// The implementation of `name` that an object of class `c` runs (or that `super.name()`
+    /// from a subclass of `c` reaches). `None`: abstract, or no such method.
+    ///
+    /// Java's rules: the nearest class wins (and an abstract declaration there means "not
+    /// implemented"); then an interface `default`; then `Object`.
+    pub fn resolve_impl(&self, c: usize, name: &Ident) -> Option<Impl> {
+        for &k in &self.chains[c] {
+            if let Some(m) = self.virtual_method(k, name) {
+                return if m.is_abstract() {
+                    None
+                } else if self.classes[k].is_interface() {
+                    Some(Impl::Default(k))
+                } else {
+                    Some(Impl::Class(k))
+                };
+            }
+        }
+        if let Some(&i) = self.ifaces[c].iter().find(|&&i| {
+            self.virtual_method(i, name)
+                .is_some_and(|m| !m.is_abstract())
+        }) {
+            return Some(Impl::Default(i));
+        }
+        OBJECT_METHODS
+            .iter()
+            .any(|o| name == o)
+            .then_some(Impl::Object)
+    }
+
+    /// The shared-method group `t`'s declaration of `name` belongs to, if any.
+    pub fn shared_of(&self, t: usize, name: &Ident) -> Option<&Shared> {
+        self.shared
+            .iter()
+            .find(|g| g.name == *name && g.decls.contains(&t))
+    }
+
+    /// Groups of declarations of the same method by related types (types that some type
+    /// has both of as supertypes). Each group becomes one trait, see [`Shared`].
+    fn shared_groups(
+        classes: &[Class],
+        chains: &[Vec<usize>],
+        ifaces: &[Vec<usize>],
+        introduces: impl Fn(usize, &Method) -> bool,
+    ) -> Vec<Shared> {
+        let mut groups: Vec<Shared> = Vec::new();
+        for t in 0..classes.len() {
+            let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            for d in chains[t].iter().chain(&ifaces[t]).copied() {
+                for m in classes[d].methods.iter().filter(|m| introduces(d, m)) {
+                    by_name.entry(m.name().to_string()).or_default().push(d);
+                }
+            }
+            for (name, decls) in by_name.into_iter().filter(|(_, d)| d.len() > 1) {
+                // Merge with every existing group of this name that shares a declaration.
+                let mut merged = Shared {
+                    name: Ident::new(&name, Span::call_site()),
+                    decls,
+                };
+                groups.retain(|g| {
+                    let overlaps =
+                        g.name == merged.name && g.decls.iter().any(|d| merged.decls.contains(d));
+                    if overlaps {
+                        for &d in &g.decls {
+                            if !merged.decls.contains(&d) {
+                                merged.decls.push(d);
+                            }
+                        }
+                    }
+                    !overlaps
+                });
+                merged.decls.sort_unstable();
+                groups.push(merged);
+            }
+        }
+        groups
     }
 
     /// The field `this.name` refers to inside a method of `class`.
     pub fn resolve_field(&self, class: usize, name: &Ident) -> Result<FieldRef, String> {
+        if self.classes[class].is_interface() {
+            return Err(format!(
+                "interface `{}` has no fields",
+                self.classes[class].name
+            ));
+        }
         let mut private_in = None;
         for &c in &self.chains[class] {
             if let Some(f) = self.classes[c].fields.iter().find(|f| f.name == *name) {
+                if f.is_static {
+                    return Err(format!(
+                        "`{name}` is a static field of `{0}`: write `{0}::{name}` or `Self::{name}`",
+                        self.classes[c].name
+                    ));
+                }
                 if c == class || f.access != Access::Private {
                     return Ok(FieldRef { owner: c });
                 }
@@ -122,6 +361,39 @@ impl Index {
         })
     }
 
+    /// The static field `Class::name` (`of` is `Class`), accessed from code in `from`.
+    /// `None`: there is no static field of that name (it may be an associated function).
+    pub fn resolve_static_field(
+        &self,
+        from: usize,
+        of: usize,
+        name: &Ident,
+    ) -> Option<Result<FieldRef, String>> {
+        for &c in &self.chains[of] {
+            if let Some(f) = self.classes[c].static_fields().find(|f| f.name == *name) {
+                return Some(if f.access == Access::Private && c != from {
+                    Err(format!(
+                        "static field `{name}` is private to class `{}`",
+                        self.classes[c].name
+                    ))
+                } else {
+                    Ok(FieldRef { owner: c })
+                });
+            }
+        }
+        None
+    }
+
+    /// The class in `of`'s chain that declares static method `name`.
+    pub fn resolve_static_method(&self, of: usize, name: &Ident) -> Option<usize> {
+        self.chains[of].iter().copied().find(|&c| {
+            self.classes[c]
+                .methods
+                .iter()
+                .any(|m| m.is_static && m.name() == name)
+        })
+    }
+
     /// Private method `name` of `class`, if any.
     pub fn private_method(&self, class: usize, name: &Ident) -> Option<&Method> {
         self.classes[class]
@@ -130,53 +402,235 @@ impl Index {
             .find(|m| m.access == Access::Private && !m.is_static && m.name() == name)
     }
 
+    pub fn find(&self, name: &Ident) -> Option<usize> {
+        self.classes.iter().position(|c| c.name == *name)
+    }
+
+    fn above_name(&self, a: &Above) -> String {
+        match a {
+            Above::Type(t) => self.classes[*t].name.to_string(),
+            Above::Object => "Object".to_string(),
+        }
+    }
+
     fn check(&self, errors: &mut Vec<syn::Error>) {
-        for (ci, class) in self.classes.iter().enumerate() {
-            let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
-            for (i, f) in class.fields.iter().enumerate() {
-                if class.fields[..i].iter().any(|g| g.name == f.name) {
-                    err(f.name.span(), format!("duplicate field `{}`", f.name));
+        for g in &self.shared {
+            let sig = |t: usize| {
+                let m = self.virtual_method(t, &g.name).expect("declared");
+                let params: Vec<String> = m
+                    .params()
+                    .map(|p| p.ty.to_token_stream().to_string())
+                    .collect();
+                (m, params, m.sig.output.to_token_stream().to_string())
+            };
+            let (_, p0, r0) = sig(g.decls[0]);
+            for &d in &g.decls[1..] {
+                let (m, p, r) = sig(d);
+                if (&p, &r) != (&p0, &r0) {
+                    let mut e = syn::Error::new(
+                        m.name().span(),
+                        format!(
+                            "`{}.{}` and `{}.{}` must have the same signature: a class \
+                             implements both with one method",
+                            self.classes[d].name, g.name, self.classes[g.decls[0]].name, g.name
+                        ),
+                    );
+                    let first = self.virtual_method(g.decls[0], &g.name).expect("declared");
+                    e.combine(syn::Error::new(
+                        first.name().span(),
+                        "the other declaration",
+                    ));
+                    errors.push(e);
                 }
             }
-            for (i, m) in class.methods.iter().enumerate() {
-                let name = m.name();
-                if class.methods[..i].iter().any(|n| n.name() == name) {
-                    err(
-                        name.span(),
-                        format!("duplicate method `{name}` (overloading is not supported)"),
-                    );
-                    continue;
-                }
-                if OBJECT_METHODS.iter().any(|o| name == o) {
-                    err(
-                        name.span(),
-                        format!("`{name}` is reserved (an `Object` method or the constructor)"),
-                    );
-                    continue;
-                }
-                let inherited = self.parent(ci).and_then(|p| self.resolve_virtual(p, name));
-                match (inherited, m.is_virtual(), m.override_) {
-                    (None, _, Some(span)) => err(
-                        span,
-                        format!("method `{name}` does not override a method from a superclass"),
+        }
+        for ci in 0..self.classes.len() {
+            if self.classes[ci].is_interface() {
+                self.check_interface(ci, errors);
+            } else {
+                self.check_class(ci, errors);
+            }
+        }
+    }
+
+    fn check_duplicates(&self, class: &Class, errors: &mut Vec<syn::Error>) {
+        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        for (i, f) in class.fields.iter().enumerate() {
+            if class.fields[..i].iter().any(|g| g.name == f.name) {
+                err(f.name.span(), format!("duplicate field `{}`", f.name));
+            }
+        }
+        for (i, m) in class.methods.iter().enumerate() {
+            let name = m.name();
+            if class.methods[..i].iter().any(|n| n.name() == name) {
+                err(
+                    name.span(),
+                    format!("duplicate method `{name}` (overloading is not supported)"),
+                );
+            }
+        }
+    }
+
+    fn check_interface(&self, ii: usize, errors: &mut Vec<syn::Error>) {
+        let iface = &self.classes[ii];
+        self.check_duplicates(iface, errors);
+        for m in &iface.methods {
+            let name = m.name();
+            if RESERVED.iter().chain(OBJECT_METHODS).any(|o| name == o) {
+                errors.push(syn::Error::new(
+                    name.span(),
+                    format!("`{name}` is reserved (an `Object` method) and can't be declared in an interface"),
+                ));
+                continue;
+            }
+            if m.is_static {
+                continue;
+            }
+            if let Some(&s) = self.ifaces[ii]
+                .iter()
+                .find(|&&s| self.virtual_method(s, name).is_some())
+            {
+                errors.push(syn::Error::new(
+                    name.span(),
+                    format!(
+                        "`{name}` is already declared in super-interface `{}`: re-declaring or \
+                         overriding it in a sub-interface is not supported",
+                        self.classes[s].name
                     ),
-                    (Some(owner), true, None) => err(
-                        name.span(),
-                        format!(
-                            "method `{name}` overrides `{}.{name}` but is not marked @Override",
-                            self.classes[owner].name
-                        ),
+                ));
+            }
+        }
+    }
+
+    fn check_class(&self, ci: usize, errors: &mut Vec<syn::Error>) {
+        let class = &self.classes[ci];
+        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        if let (Some(parent), Some(p)) = (&class.parent, self.parent(ci))
+            && self.classes[p].final_.is_some()
+        {
+            err(
+                parent.span(),
+                format!("cannot inherit from final class `{parent}`"),
+            );
+        }
+        self.check_duplicates(class, errors);
+        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        for m in &class.methods {
+            let name = m.name();
+            if RESERVED.iter().any(|o| name == o) {
+                err(
+                    name.span(),
+                    format!("`{name}` is reserved (an `Object` method or the constructor)"),
+                );
+                continue;
+            }
+            if let Some(a) = m.abstract_
+                && class.abstract_.is_none()
+            {
+                err(
+                    a,
+                    format!(
+                        "abstract method `{name}` in class `{0}`, which is not abstract: declare \
+                         `abstract class {0}`",
+                        class.name
                     ),
-                    (Some(owner), false, _) => err(
-                        name.span(),
-                        format!(
-                            "{} method `{name}` would hide the inherited method `{}.{name}`",
-                            if m.is_static { "static" } else { "private" },
-                            self.classes[owner].name
-                        ),
+                );
+            }
+            let above = self.declared_above(ci, name);
+            match (&above, m.is_virtual(), m.override_) {
+                (None, _, Some(span)) => err(
+                    span,
+                    format!(
+                        "method `{name}` does not override or implement a method from a \
+                         superclass, an interface or `Object`"
                     ),
-                    _ => {}
+                ),
+                (Some(a), true, None) => err(
+                    name.span(),
+                    format!(
+                        "method `{name}` {} `{}.{name}` but is not marked @Override",
+                        if matches!(a, Above::Type(t) if self.classes[*t].is_interface()) {
+                            "implements"
+                        } else {
+                            "overrides"
+                        },
+                        self.above_name(a)
+                    ),
+                ),
+                (Some(a), false, _) => err(
+                    name.span(),
+                    format!(
+                        "{} method `{name}` would hide the inherited method `{}.{name}`",
+                        if m.is_static { "static" } else { "private" },
+                        self.above_name(a)
+                    ),
+                ),
+                _ => {}
+            }
+            if let (Some(a), true, Some(s)) = (&above, m.is_virtual(), m.abstract_) {
+                err(
+                    s,
+                    format!(
+                        "abstract method `{name}` cannot re-declare `{}.{name}`: leave it out, \
+                         an abstract class does not have to implement inherited methods",
+                        self.above_name(a)
+                    ),
+                );
+            }
+            if m.is_virtual()
+                && let Some(p) = self.parent(ci)
+                && let Some(owner) = self.chains[p].iter().copied().find(|&c| {
+                    self.virtual_method(c, name)
+                        .is_some_and(|m| m.final_.is_some())
+                })
+            {
+                err(
+                    name.span(),
+                    format!(
+                        "cannot override final method `{}.{name}`",
+                        self.classes[owner].name
+                    ),
+                );
+            }
+        }
+
+        // A concrete class must end up with an implementation of every method it has.
+        if class.abstract_.is_none() {
+            let mut missing = Vec::new();
+            let mut seen = Vec::new();
+            for d in self.supertypes(ci) {
+                for m in self.classes[d].methods.iter().filter(|m| m.is_virtual()) {
+                    let name = m.name();
+                    if seen.contains(name) {
+                        continue;
+                    }
+                    seen.push(name.clone());
+                    // An abstract method of this very class is reported on its own.
+                    if self.resolve_impl(ci, name).is_none()
+                        && self
+                            .virtual_method(ci, name)
+                            .is_none_or(|m| m.abstract_.is_none())
+                    {
+                        let owner = self.supertypes(ci).find(|&o| {
+                            self.virtual_method(o, name)
+                                .is_some_and(Method::is_abstract)
+                        });
+                        let owner = owner.unwrap_or(d);
+                        missing.push(format!("`{}.{name}`", self.classes[owner].name));
+                    }
                 }
+            }
+            if !missing.is_empty() {
+                err(
+                    class.name.span(),
+                    format!(
+                        "class `{}` is not abstract and does not implement {}: implement {} \
+                         (with @Override) or declare the class `abstract`",
+                        class.name,
+                        missing.join(", "),
+                        if missing.len() == 1 { "it" } else { "them" },
+                    ),
+                );
             }
         }
     }
@@ -184,9 +638,13 @@ impl Index {
 
 // Generated names. All of them start with `__roost_` / `__Roost` and are `#[doc(hidden)]`.
 
-/// `trait AnimalClass`: the vtable; `type Animal = dyn AnimalClass`.
+/// `trait AnimalClass` / `trait PetInterface`: the vtable; `type Animal = dyn AnimalClass`.
 pub fn trait_name(class: &Class) -> Ident {
-    format_ident!("{}Class", class.name)
+    if class.is_interface() {
+        format_ident!("{}Interface", class.name)
+    } else {
+        format_ident!("{}Class", class.name)
+    }
 }
 
 /// The concrete struct an `Animal` instance (exactly `Animal`, not a subclass) is.
@@ -204,6 +662,11 @@ pub fn accessor_name(owner: &Class, field: &Ident) -> Ident {
     format_ident!("__roost_field_{}_{}", owner.name, field)
 }
 
+/// The thread-local holding `owner`'s static field `field`.
+pub fn static_name(owner: &Class, field: &Ident) -> Ident {
+    format_ident!("__ROOST_STATIC_{}_{}", owner.name, field)
+}
+
 /// `impl dyn AnimalClass { fn __roost_method_speak<T>(this: &T) }`: Animal's implementation.
 pub fn method_impl_name(name: &Ident) -> Ident {
     format_ident!("__roost_method_{}", name)
@@ -211,6 +674,16 @@ pub fn method_impl_name(name: &Ident) -> Ident {
 
 pub fn private_impl_name(name: &Ident) -> Ident {
     format_ident!("__roost_private_{}", name)
+}
+
+/// The trait holding a [`Shared`] method: named after its first declaration.
+pub fn shared_trait_name(index: &Index, g: &Shared) -> Ident {
+    format_ident!("__Roost{}_{}", index.classes[g.decls[0]].name, g.name)
+}
+
+/// The marker trait whose unsatisfiable bound makes `Shape::new(..)` an error.
+pub fn abstract_marker_name(class: &Class) -> Ident {
+    format_ident!("__RoostAbstract{}", class.name)
 }
 
 pub const CONSTRUCT: &str = "__roost_construct";

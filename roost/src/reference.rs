@@ -7,7 +7,7 @@ use std::ops::{CoerceUnsized, Deref, DispatchFromDyn};
 
 use crate::cast::CastRequest;
 use crate::gc::{Finalize, Gc, Trace};
-use crate::object::Object;
+use crate::object::ObjectClass;
 
 /// A reference to a garbage-collected object: what a Java variable of class type holds.
 ///
@@ -16,7 +16,7 @@ use crate::object::Object;
 ///   calls go through the vtable. `Ref<Dog>` converts to it implicitly (unsizing).
 ///
 /// Cloning copies the reference, not the object. There is no `PartialEq`: comparing
-/// references is [`Ref::ptr_eq`], comparing objects is [`Object::equals`].
+/// references is [`Ref::ptr_eq`], comparing objects is [`ObjectClass::equals`].
 pub struct Ref<T: ?Sized + 'static>(Gc<T>);
 
 impl<T: Trace> Ref<T> {
@@ -64,7 +64,7 @@ impl<T: ?Sized> Ref<T> {
     }
 }
 
-impl<T: ?Sized + Object> Ref<T> {
+impl<T: ?Sized + ObjectClass> Ref<T> {
     /// Java's `x instanceof U`. `U` is a concrete class (`Puppy`) or a class trait object
     /// (`dyn Dog`); `true` for subclasses too.
     pub fn instance_of<U: ?Sized + 'static>(&self) -> bool {
@@ -157,15 +157,15 @@ unsafe impl<T: ?Sized + Trace> Trace for Ref<T> {
 }
 
 /// `toString()`.
-impl<T: ?Sized + Object> fmt::Display for Ref<T> {
+impl<T: ?Sized + ObjectClass> fmt::Display for Ref<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&Object::to_string(&**self))
+        f.write_str(&ObjectClass::to_string(&**self))
     }
 }
 
-impl<T: ?Sized + Object> fmt::Debug for Ref<T> {
+impl<T: ?Sized + ObjectClass> fmt::Debug for Ref<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Ref({})", Object::to_string(&**self))
+        write!(f, "Ref({})", ObjectClass::to_string(&**self))
     }
 }
 
@@ -174,6 +174,7 @@ mod tests {
     use std::mem::size_of;
 
     use super::*;
+    use crate::Object;
     use crate::gc::{self, Counter, GcCell};
     use crate::test_classes::*;
 
@@ -201,7 +202,7 @@ mod tests {
         let p = puppy("Rex");
         let as_dog: Ref<dyn Dog> = p.clone();
         let as_animal: Ref<dyn Animal> = p.clone();
-        let as_object: Ref<dyn Object> = p.clone();
+        let as_object: Ref<Object> = p.clone();
         assert!(Ref::ptr_eq(&p, &as_dog));
         assert!(Ref::ptr_eq(&as_dog, &as_animal));
         assert!(Ref::ptr_eq(&as_animal, &as_object));
@@ -213,7 +214,7 @@ mod tests {
         let p: Ref<Puppy> = puppy("Rex");
         let d: Ref<dyn Dog> = p; // class -> its class trait
         let a: Ref<dyn Animal> = d.clone(); // trait upcasting: dyn Dog -> dyn Animal
-        let o: Ref<dyn Object> = a.clone(); // ... -> dyn Object
+        let o: Ref<Object> = a.clone(); // ... -> Object
         assert_eq!(d.fetch(), "Rex fetches clumsily");
         assert_eq!(a.speak(), "Rex says yip");
         assert!(o.class_name().ends_with("Puppy"));

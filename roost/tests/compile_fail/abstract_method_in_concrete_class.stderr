@@ -1,0 +1,5 @@
+error: abstract method `area` in class `Shape`, which is not abstract: declare `abstract class Shape`
+ --> tests/compile_fail/abstract_method_in_concrete_class.rs:5:16
+  |
+5 |         public abstract fn area() -> f64;
+  |                ^^^^^^^^

@@ -4,16 +4,19 @@ An experiment: a Java-like object model for Rust — classes, field inheritance,
 methods dispatched through a vtable, and instanceof-style downcasting — on top of a tracing
 garbage collector, all behind macros.
 
-Status: **class DSL MVP**. `roost::class!` declares classes with fields, single
-inheritance of any depth, constructors, virtual methods, `super`, and `this.field`; the
-runtime underneath is tested on its own. Interfaces, abstract/final, static fields and
-`toString`/`equals` overrides come next. The first spike lives on as a regression suite.
+Status: **class DSL**. `roost::class!` declares classes with fields, single
+inheritance of any depth, constructors, virtual methods, `super`, and `this.field`; interfaces
+(with `extends` and `default` methods), `abstract` / `final` classes and methods, `static`
+fields (thread-local) and methods, and `toString` / `equals` / `hashCode` overrides. The
+runtime underneath is tested on its own. The first spike lives on as a regression suite.
 
 ```sh
-cargo test                              # runtime unit tests + class! tests + spike + doctests
-cargo run -p roost --example zoo        # the class DSL in one screen
+cargo test                              # runtime unit tests + class! tests + trybuild + spike + doctests
+cargo run -p roost --example zoo        # classes, extends, super, cast
+cargo run -p roost --example shapes     # interface + abstract + static + Object methods
 cargo run -p roost --example spike      # walks through the spike's five demos
-cargo miri test -p roost --lib          # the runtime's unsafe code under Miri (CI also runs --test class)
+cargo miri test -p roost --lib          # the runtime's unsafe code under Miri (CI also runs --test class / oop)
+TRYBUILD=overwrite cargo test -p roost --test compile_fail   # regenerate .stderr snapshots (review the diff!)
 ```
 
 ```rust
@@ -73,9 +76,12 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
 | 路径 | 内容 |
 | --- | --- |
 | `roost/` | 运行时，见下 |
-| `roost-macros/` | proc-macro `class!`：`model.rs`（语法树 + 解析）、`index.rs`（继承链、名字解析、`@Override` 等检查）、`rewrite.rs`（改写 `this.field` / `super`）、`expand.rs`（生成代码）。诊断信息有单元测试 |
+| `roost-macros/` | proc-macro `class!`：`model.rs`（语法树 + 解析）、`index.rs`（继承链、接口闭包、每个方法用哪个实现、`@Override` / abstract / final 等检查）、`rewrite.rs`（改写 `this.field` / `Class::static_field` / `super`）、`expand.rs`（生成代码）。诊断信息有单元测试 |
 | `roost/tests/class.rs` | `class!` 的端到端测试（三层继承 + 一个兄弟类） |
+| `roost/tests/oop.rs` | interface / abstract / final / static / Object 方法的端到端测试 |
+| `roost/tests/compile_fail.rs`，`roost/tests/compile_fail/` | trybuild：每个编译期报错一个 `.rs` + `.stderr` 快照 |
 | `roost/examples/zoo.rs` | `class!` 的演示 |
+| `roost/examples/shapes.rs` | interface + abstract + static + `toString` / `equals` 的演示 |
 | `roost/tests/spike.rs` | 第一棒 spike 的测试（五件事 + GcCell 冲突的证据），原样保留 |
 | `roost/tests/spike/` | spike 的对象模型：`object.rs`（`base_class!` / `derived_class!`）、`zoo.rs`、`probe.rs` |
 | `roost/examples/spike.rs` | spike 的演示，和测试共用 `tests/spike/` 下的模块 |
@@ -87,15 +93,17 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
 `roost/src/test_classes.rs` 是手写的「宏大概会生成成这样」：`Animal` → `Dog`（非叶子）→ `Puppy`，以及 `Cat`）。
 
 - **`Ref<T: ?Sized>`**：包一个 `Gc<T>`。`Clone`（复制引用，不复制对象）、`Deref`；`Ref<Puppy>` 能隐式转成
-  `Ref<dyn Dog>` / `Ref<dyn Animal>` / `Ref<dyn Object>`（`CoerceUnsized`，trait 之间靠 trait upcasting）；
+  `Ref<dyn Dog>` / `Ref<dyn Animal>` / `Ref<Object>`（`CoerceUnsized`，trait 之间靠 trait upcasting）；
   `DispatchFromDyn`，所以类 trait 里可以写 `self: Ref<Self>` 的方法。`Ref::ptr_eq` 是 Java 的引用 `==`，
-  两边静态类型可以不同，只比地址不比 vtable。故意没有 `PartialEq`。`Display` / `Debug` 走 `Object::to_string`。
-- **`Object`**：根类 trait。`to_string`（默认 `类名@十六进制hash`）、`hash_code`（按地址的 identity hash，
-  gc 不移动对象所以稳定）、`equals`（默认 identity）、`class_name`，都有默认实现。`Any` 支持：`AsAny` 是
-  `Object` 的父 trait，`animal.as_any()` 经过 vtable 拿到具体类的 `&dyn Any`。
+  两边静态类型可以不同，只比地址不比 vtable。故意没有 `PartialEq`。`Display` / `Debug` 走 `ObjectClass::to_string`。
+- **`ObjectClass`**：根类 trait；**`Object`** 是 `type Object = dyn ObjectClass`，和类一样写 `Ref<Object>`。
+  `to_string`（默认 `类名@十六进制hash`）、`hash_code`（按地址的 identity hash，gc 不移动对象所以稳定）、
+  `equals(other: Ref<Object>)`（默认 identity）、`class_name`，都有默认实现；前三个的默认实现另有自由函数版本
+  （`super.to_string()` 落到它们）。`Any` 支持：`AsAny` 是 `ObjectClass` 的父 trait，`animal.as_any()` 经过
+  vtable 拿到具体类的 `&dyn Any`。
 - **`instance_of` / `cast`**：`r.instance_of::<dyn Dog>()`，`r.cast::<dyn Dog>() -> Option<Ref<dyn Dog>>`，
   失败返回 `None`。目标可以是具体类，也可以是**非叶子类的 trait object**（`Ref<dyn Animal>` → `Ref<dyn Dog>`，
-  spike 做不到这个）。做法：`cast` 虚调用 `Object::__roost_casts`，具体类在里面把自己作为它能被看成的每个类型
+  spike 做不到这个）。做法：`cast` 虚调用 `ObjectClass::__roost_casts`，具体类在里面把自己作为它能被看成的每个类型
   「报上来」（`req.offer_class(self).offer::<dyn Dog, _>(self)...`，以后由宏生成），只有类型匹配的那一项被采用。
   这个方法是 safe 的，写错了也不会 UB：`cast` 会核对报上来的指针确实来自这个对象本身（同一地址、同一个运行期
   类型），否则当作失败（有测试故意「撒谎」）。
@@ -103,26 +111,66 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
   把 `counter.probe()` 放进对象的字段，`counter.finalized()` / `counter.dropped()` 就是这些对象被 finalize /
   被释放的次数。不是线程本地全局量，每个测试自己 new 一个。
 
-另外两样只给生成代码用：`Ref::upcast`（表达式里的显式向上转型），`roost::__private::{get, set}`（字段读写，
-各自只在函数内部短借用）。`roost::prelude` 导出 `Ref`、`Object`、`class!`。
+另外两样只给生成代码用：`Ref::upcast`（表达式里的显式向上转型），`roost::__private::{get, set, get_static,
+set_static}`（字段 / 静态字段读写，各自只在函数内部短借用）。`roost::prelude` 导出 `Ref`、`Object`、
+`ObjectClass`、`class!`。
 
 `#[derive(Trace)]` 展开成 `::gc::Trace`、用户 crate 必须直接依赖 `gc` 的问题，对 `class!` 不存在：它自己生成
-`Trace` impl，路径都经由 `::roost`。`Object::__roost_casts` 也由宏生成，祖先列表不会漏。
+`Trace` impl，路径都经由 `::roost`。`ObjectClass::__roost_casts` 也由宏生成，祖先和接口列表不会漏。
 
 ## `class!` DSL
 
 ### 语法
 
 ```text
-class   := attr* ("public")? "class" Name ("extends" Parent)? "{" member* "}"
-member  := attr* ("@Override")? access ( field | ctor | method )
-field   := name ":" Type ("=" expr)? ";"
-ctor    := Name "(" params ")" { ("super(" args ");")? stmts }     // Name 就是类名
-method  := ("static")? "fn" name "(" params ")" ("->" Type)? block
-access  := "public" | "protected" | "private" | 空（包级）
+class     := attr* ("public")? ("abstract" | "final")? "class" Name ("extends" Parent)?
+             ("implements" Iface ("," Iface)*)? "{" member* "}"
+interface := attr* ("public")? "interface" Name ("extends" Iface ("," Iface)*)? "{" imember* "}"
+member    := attr* ("@Override")? access modifier* ( field | ctor | method )
+modifier  := "static" | "abstract" | "final"                     // 顺序随意
+field     := name ":" Type ("=" expr)? ";"                       // static 字段同样写法
+ctor      := Name "(" params ")" { ("super(" args ");")? stmts } // Name 就是类名
+method    := "fn" name "(" params ")" ("->" Type)? (block | ";") // ";" 当且仅当 abstract
+imember   := attr* ("public")? ( "fn" sig ";" | "default" "fn" sig block | "static" "fn" sig block )
+access    := "public" | "protected" | "private" | 空（包级）
 ```
 
-方法体里用 `this`，不写 `self` 参数。`static fn` 是没有 `this` 的关联函数，调用写 `Animal::kingdom()`。
+方法体里用 `this`，不写 `self` 参数。`static fn` 是没有 `this` 的关联函数，调用写 `Animal::count()`；
+`static` 字段在类里的任何方法 / 构造器里写 `Animal::count` 或 `Self::count`（读、`=`、`+=` 都行）。
+
+```rust
+class! {
+    public interface Named { fn name() -> String; }
+    public interface Pet extends Named {
+        fn owner() -> String;
+        default fn greet() -> String { format!("{} greets {}", this.name(), this.owner()) }
+    }
+
+    public abstract class Animal implements Named {
+        protected name: String;
+        private static created: i32 = 0;
+        protected Animal(name: String) { this.name = name; Animal::created += 1; }
+        @Override public fn name() -> String { this.name }
+        public abstract fn legs() -> i32;
+        public final fn kind() -> String { "animal".into() }
+        public static fn created() -> i32 { Self::created }
+    }
+
+    public final class Dog extends Animal implements Pet {
+        public Dog(name: String) { super(name); }
+        @Override public fn legs() -> i32 { 4 }
+        @Override public fn owner() -> String { "Ann".into() }
+        @Override public fn to_string() -> String { format!("Dog({})", this.name) }
+    }
+}
+
+let p: Ref<Pet> = Dog::new("Rex".into());
+p.greet();                         // "Rex greets Ann"
+p.instanceof::<Named>();           // true
+let a: Ref<Animal> = p.cast::<Animal>().unwrap();
+format!("{a}");                    // "Dog(Rex)"：Display 走 toString
+Animal::created();                 // 1
+```
 
 ### 生成了什么
 
@@ -131,10 +179,13 @@ access  := "public" | "protected" | "private" | 空（包级）
 | 生成物 | 作用 |
 | --- | --- |
 | `type Dog = dyn DogClass;` | 用户写的 `Ref<Dog>` 就是多态引用，不出现 `dyn`。edition 2024 禁止裸 trait object，用别名绕开 |
-| `trait DogClass: AnimalClass` | vtable：Dog **新引入**的虚方法 + Dog 每个字段一个隐藏访问器 `__roost_field_Dog_tricks(&self) -> &GcCell<i32>`。根类的 trait 以 `roost::Object` 为父 trait |
-| `struct __RoostDog` | 运行期类**恰好是** Dog 的对象。继承链上所有类的字段**平铺**在里面（根类在前，每个字段一个 `GcCell`，名字带类名，所以父子类字段同名也不冲突）。`Trace` / `Finalize` / `Object` 都是生成的，不依赖 `#[derive(Trace)]`（所以用户 crate 不用直接依赖 `gc`） |
-| `impl AnimalClass for __RoostDog`、`impl DogClass for __RoostDog` | 链上每个类一个 impl。每个虚方法转发到**编译期解析好**的最近实现，所以三层、N 层都一样 |
-| `impl dyn DogClass { fn new(..), .. }` | `Dog::new(..)` 构造器；方法体都在这里，形如 `fn __roost_method_speak<T: ?Sized + DogClass>(this: &T)` |
+| `trait DogClass: AnimalClass + PetInterface` | vtable：Dog **新引入**的虚方法 + Dog 每个字段一个隐藏访问器 `__roost_field_Dog_tricks(&self) -> &GcCell<i32>`。父 trait 是父类的 trait（根类是 `roost::ObjectClass`）加上 `implements` 的每个接口的 trait |
+| `type Pet = dyn PetInterface;`、`trait PetInterface: ObjectClass + NamedInterface` | 接口：方法声明（含 `default` 方法）。`default` 方法体和 `static` 方法在 `impl dyn PetInterface` 里，和类的方法体一样对 `T` 泛型 |
+| `thread_local! { static __ROOST_STATIC_Animal_created: GcCell<i32> }` | static 字段，每个线程一份（gc 也是线程本地的），第一次访问时求初值，像 Java 的类初始化 |
+| `struct __RoostDog` | 运行期类**恰好是** Dog 的对象（抽象类不生成）。继承链上所有类的字段**平铺**在里面（根类在前，每个字段一个 `GcCell`，名字带类名，所以父子类字段同名也不冲突）。`Trace` / `Finalize` / `ObjectClass` 都是生成的，不依赖 `#[derive(Trace)]`（所以用户 crate 不用直接依赖 `gc`） |
+| `impl AnimalClass for __RoostDog`、`impl DogClass for __RoostDog`、`impl PetInterface for __RoostDog`、… | 链上每个类、实现的每个接口（含父接口、父类实现的接口）一个 impl。每个方法转发到**编译期解析好**的实现：最近的类里的方法体，没有就是接口的 `default`，所以三层、N 层都一样。`impl ObjectClass` 里转发覆盖了的 `to_string` / `equals` / `hash_code` |
+| `impl dyn DogClass { fn new(..), .. }` | `Dog::new(..)` 构造器；方法体都在这里，形如 `fn __roost_method_speak<T: ?Sized + DogClass>(this: &T)`。抽象类的 `new` 带一个永远不满足的约束（见下） |
+| `trait __RoostBook_title` | 只在「同一个方法被有关系的两个类型都声明」时出现：类 `Book` 有 `title()`，`Novel extends Book implements Titled` 而接口 `Titled` 也声明了 `title()`。若两个 trait 各自声明，`novel.title()` 会 E0034 歧义，而 trait object 上的歧义**没法**用 inherent 方法盖掉（试过）。所以把这个方法单独放进一个 trait，`BookClass` 和 `TitledInterface` 都以它为父 trait：沿两条路径到达的是同一个方法。几处声明的签名必须一致，否则宏报错 |
 
 关键在最后一条：**方法体和构造器体都对 `this` 的具体类 `T` 泛型**，按具体类单态化。所以 Animal 的构造器在构造
 Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地落到 Dog 的覆盖版本，这就是 Java 语义
@@ -157,11 +208,30 @@ Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地�
   格式化宏（`format!(.., this.name)`）里的字段读也会改写。
 - **方法默认是虚方法**（public / protected / 包级），`private` 方法不是虚方法（不进 vtable，子类同名方法是新方法），
   `static` 方法也不是。
-- `@Override`：标了但父类链上没有这个虚方法 → 编译错误；覆盖了父类方法却没标 → **编译错误**（Java 只是
+- `@Override`：标了但父类链、实现的接口、`Object` 里都没有这个方法 → 编译错误；覆盖父类方法、实现接口方法、
+  覆盖 `Object` 方法却没标 → **编译错误**（Java 只是
   可选注解，这里更严：proc macro 在 stable API 上发不了 warning）。参数 / 返回类型和父类不一致时 rustc 报
   E0053，同时指向覆盖处和父类声明处。
-- `instanceof` / `cast` 到任意祖先（包括非叶子类）都由宏生成 `__roost_casts`，失败返回 `None`。`Ref::ptr_eq`
-  是引用相等。
+- `instanceof` / `cast` 到任意祖先（包括非叶子类）**和任意实现了的接口**（`instanceof::<Pet>()`、
+  `cast::<Pet>()`，接口之间、接口回到类也行）都由宏生成 `__roost_casts`，失败返回 `None`。`Ref::ptr_eq`
+  是引用相等。`Ref<Dog>` → `Ref<Pet>` → `Ref<Named>` → `Ref<Object>` 都是隐式转换。
+- **接口**：方法隐式 public；没有方法体的是抽象方法，`default fn` 带方法体，`static fn` 是静态方法
+  （`Pet::species()`）。`interface A extends B, C`。类实现接口方法要写 `@Override`（同覆盖，见上）。
+  方法由谁实现按 Java 的规则：继承链上最近的类（父类里继承来的方法也能实现接口方法）优先于接口的 `default`；
+  父类里的 `abstract` 声明优先于接口的 `default`（子类仍须实现）。接口不能有字段、构造器、private 方法。
+- **abstract**：`abstract class` 不能 new：`Shape::new(..)` 在调用处报 `E0277 cannot instantiate abstract
+  class `Shape``（靠 `#[diagnostic::on_unimplemented]` 和一个永远不满足的约束）。抽象类可以有构造器（给子类
+  `super(..)` 用）。`abstract fn` 只能出现在 abstract class 里、不能有方法体、不能是 `private` / `static` /
+  `final`。具体类没实现所有抽象方法（来自抽象父类或接口）时报错，**报错位置是这个具体类的类名**，列出缺的方法。
+- **final**：`extends` 一个 `final class` 报错（指向 `extends` 后面的父类名）；覆盖 `final fn` 报错（指向子类的方法名）。
+- **static**：`static` 字段放在线程本地存储里（`thread_local!` + `GcCell`），存 `Ref` 也没问题（它是 GC root）。
+  每个线程有自己的一份，和 gc 的堆一样。`private static` 只有声明它的类能访问。类里也可以写 `Dog::created()`
+  调父类的静态方法（宏改写成 `Animal` 的）。静态字段和静态方法可以同名（`Animal::count` 和 `Animal::count()`，
+  和 Java 一样分开）。
+- **`Object` 的方法**：`to_string`、`equals`、`hash_code` 可以用 `@Override` 覆盖（不标也是错误），
+  `super.to_string()` 等可以调到父类的版本或 `Object` 的默认实现。`Ref` 的 `Display`（`format!("{r}")`、
+  `r.to_string()`）和 `Debug` 走 `to_string()`。签名：`to_string() -> String`、`hash_code() -> i32`、
+  `equals(other: Ref<Object>) -> bool`，实现里用 `other.cast::<Point>()` 判断类型。
 - `Ref<X>`、`Option<Ref<X>>`（以及任何 `Trace` 类型）的字段都会被追踪，对象环能被回收
   （`cycle_across_three_levels_is_collected`，CI 里同样验证了「跳过 collect 时这个测试会失败」）。
 
@@ -178,19 +248,38 @@ Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地�
 | 重载 | 支持 | 不支持（每个类最多一个构造器，方法不能同名） |
 | 字段隐藏 | 子类同名字段隐藏父类的 | 一样（存储按类名区分） |
 | `this` 作为值 | 可以存起来、传出去 | 方法体里 `this` 是 `&T`，不能存成 `Ref`。环只能从外部建（`a.befriend(b)`） |
-| 泛型方法 / 泛型类 | 支持 | 不支持（泛型方法不能进 vtable） |
-| 静态方法调用 | 可以省略类名 | 要写 `Animal::f()`（在本类方法体里也可以写 `Self::f()`） |
-| `Object` 的方法 | `toString` 等可覆盖 | `class_name()` 返回类名，`to_string()` 是 `类名@hash`；覆盖它们是下一个子任务，现在用这些名字会报错 |
+| 泛型方法 / 泛型类 | 支持 | 不支持（泛型方法不能进 vtable；泛型类见「限制」） |
+| 静态方法调用 | 可以省略类名 | 要写 `Animal::f()`（在本类方法体里也可以写 `Self::f()`；`Dog::f()` 调继承来的静态方法只在类里有效，类外要写声明它的类 `Animal::f()`） |
+| 静态字段 | `Animal.count`，可省略类名；全进程一份 | 写 `Animal::count` / `Self::count`，**只能在类里**用（类外请写 static getter，和实例字段一样）。**每个线程一份**（`thread_local!`），因为 gc 堆是线程本地的；初值在该线程第一次访问时求值 |
+| `==` | 引用比较 | **不重载 `==`**：`Ref` 没有 `PartialEq`。引用相等用 `Ref::ptr_eq(&a, &b)`，值相等用 `a.equals(b.clone())`。理由：Java 的 `==` 对引用是同一性，Rust 读者看到 `==` 会以为是值比较；两种都写成显式的名字就不会混 |
+| `Object` 的方法名 | `toString()` / `equals(Object)` / `hashCode()` | Rust 命名：`to_string()` / `equals(other: Ref<Object>)` / `hash_code()`，用 `@Override` 覆盖。`equals` 的参数按值收 `Ref<Object>`（任何 `Ref` 都能隐式转过去），调用时通常要 `b.clone()`（复制引用，不复制对象）。`class_name()`（≈ `getClass().getSimpleName()`）不能覆盖 |
+| `Object` 类型 | `Object o` | `Ref<Object>`（`type Object = dyn ObjectClass`）。不能写 `extends Object`，也不需要 |
+| 接口 | 可有常量、`private` 方法、`static` 方法、泛型 | 只有抽象方法、`default` 方法、`static` 方法。子接口不能重新声明 / 覆盖父接口的方法（包括 `default`）；`X.super.m()` 不支持 |
+| 实现接口方法 | `@Override` 可选 | `@Override` **必须**写（和覆盖一样，见上） |
+| 同名方法冲突 | 两个接口的同名方法由一个实现满足 | 一样（见上面 `__RoostBook_title`）。但几处声明签名必须完全一致（Java 允许返回类型协变，这里不行） |
+| `abstract` 方法覆盖 | 抽象方法可以「重新抽象」一个继承来的具体方法 | 不支持：`abstract fn` 不能覆盖 / 重新声明任何方法 |
+| `final` | 类、方法、字段、局部变量 | 只支持 `final class` 和 `final fn`。`final` 字段（含 `static final` 常量）不支持，会报错；常量请用 Rust 的 `const` |
 
 ### 限制
 
 - **一个继承树必须写在同一个 `class!` 块里**。`extends` 不在当前块里的类会报错（错误信息说明了这一点）。
   跨块 / 跨模块 / 跨 crate 继承需要把父类的元信息传给子类的展开（比如父类展开时顺带生成一个
   `macro_rules!` 携带自己的声明），留给后面。
+- **不支持泛型类**（`class Box<T: Trace> { value: T; }`，任务里的可选项，评估后没做）。`type Box<T> = dyn BoxClass<T>`
+  本身写得出来，难的是其余部分全要带上类型参数：字段的扁平存储 `__RoostBox<T>`、`Trace` impl 的约束、
+  `extends Box<String>` 时把父类的字段类型 / 方法签名里的 `T` 代换掉（index 现在按名字解析，不做类型代换）、
+  `cast` 需要 `T: 'static` 且不同实例化是不同的类、方法体已经对 `this` 的具体类泛型，还要再叠一层。代价接近
+  再写一遍 index，收益在 Rust 里有限（泛型容器本来就有）。现在写 `class Box<T>` 报 `generic classes are not supported`。
 - 用户 crate 要用 nightly 工具链，但**不需要**写任何 `#![feature]`：unsize 相关的 impl 都在 roost 里。
 - `rustfmt` 不格式化 `class! { }` 里面。
 - 诊断：方法体里的错误、覆盖签名不一致（E0053）、字段类型不是 `Trace`、拼错方法名，都指向用户代码；
-  宏自己的检查（`@Override`、private、`super(..)` 位置、未知父类……）也指向用户写的 token。
+  宏自己的检查（`@Override`、private、`super(..)` 位置、未知父类、abstract / final、缺实现……）也指向用户写的 token。
+  这些编译期报错在 `roost/tests/compile_fail/` 里都有 trybuild 用例和 `.stderr` 快照（快照绑定在钉住的 nightly 上，
+  升级工具链后用 `TRYBUILD=overwrite` 重新生成并审阅 diff）。
+- 某个方法体里有宏能发现的错误（例如静态方法里用 `this`、未知字段）时，宏报错后把整个方法体换成
+  `unreachable!()`，避免 rustc 在占位表达式上堆出无关的后续错误；所以同一个方法体里的其他错误要等这个修了才会出现。
+- `new` 抽象类的报错还带着生成代码的痕迹（`the trait __RoostAbstractShape is not implemented for &()`
+  这类 help 行），主消息和位置是对的。
 
 ## 第一棒 spike（PR #1）
 

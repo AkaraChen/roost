@@ -8,3 +8,6 @@ publish.workspace = true
 [dependencies]
 gc.workspace = true
 roost-macros.workspace = true
+
+[dev-dependencies]
+trybuild = "1.0"

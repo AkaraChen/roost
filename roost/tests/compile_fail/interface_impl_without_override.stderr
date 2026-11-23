@@ -1,0 +1,5 @@
+error: method `name` implements `Pet.name` but is not marked @Override
+ --> tests/compile_fail/interface_impl_without_override.rs:6:19
+  |
+6 |         public fn name() -> String { "Rex".into() }
+  |                   ^^^^
