@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs exactly the nightly pinned in rust-toolchain.toml (with rustfmt + clippy).
+      - name: Install pinned nightly
+        run: |
+          rustup toolchain install
+          rustc -V
+          rustc -V | grep -q nightly || { echo "toolchain is not nightly"; exit 1; }
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo run (demo)
+        run: cargo run
+
+      # The cycle tests must depend on the collector. With every collection turned into a
+      # no-op they have to fail; if they pass, the assertions don't bite.
+      - name: cycle tests fail without GC
+        run: |
+          if ROOST_SKIP_COLLECT=1 cargo test --test spike five_; then
+            echo "cycle tests passed without running the collector: assertions are toothless"
+            exit 1
+          fi
+          echo "OK: cycle tests fail when collection is skipped"
