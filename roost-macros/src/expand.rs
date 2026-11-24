@@ -32,12 +32,12 @@ use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Ident, Pat, PatType, ReturnType};
 
-use crate::index::{self, Index};
+use crate::index::{self, Impl, Index};
 use crate::model::{Access, Class, Method};
 use crate::rewrite::{Rewriter, take_super_call};
 
 pub fn expand(index: &Index, errors: &mut Vec<syn::Error>) -> TokenStream {
-    let mut out = TokenStream::new();
+    let mut out = shared_traits(index);
     for ci in 0..index.classes.len() {
         out.extend(expand_class(index, ci, errors));
     }
@@ -101,21 +101,182 @@ fn is_doc(a: &Attribute) -> bool {
 fn rewrite_body(
     index: &Index,
     ci: usize,
+    has_this: bool,
     body: &syn::Block,
     errors: &mut Vec<syn::Error>,
-) -> syn::Block {
+) -> (syn::Block, TokenStream) {
     let mut body = body.clone();
+    let before = errors.len();
     Rewriter {
         index,
         class: ci,
+        has_this,
         errors,
     }
     .visit_block_mut(&mut body);
-    body
+    if errors.len() > before {
+        // The error is reported; drop the body so that rustc doesn't pile follow-up errors
+        // on the placeholder expressions.
+        return (
+            syn::parse_quote!({ ::core::unreachable!() }),
+            quote!(#[allow(unused_variables, unreachable_code)]),
+        );
+    }
+    (body, TokenStream::new())
+}
+
+/// `fn name(&self, ..) -> R { <dyn OwnerTrait>::__roost_method_name(self, ..) }`: the vtable
+/// entry of concrete class `ci` for method `name`, declared as `decl` somewhere up.
+fn forward(index: &Index, ci: usize, decl: &Method) -> TokenStream {
+    let mname = decl.name();
+    let (sig_m, target) = match index.resolve_impl(ci, mname) {
+        Some(Impl::Class(k) | Impl::Default(k)) => {
+            let m = index
+                .virtual_method(k, mname)
+                .expect("resolve_impl found it");
+            let tr = index::trait_name(&index.classes[k]);
+            let f = index::method_impl_name(mname);
+            (m, Some(quote!(<dyn #tr>::#f)))
+        }
+        // Missing implementation: reported by the index at the class. Keep the impl
+        // complete so that is the only error.
+        Some(Impl::Object) | None => (decl, None),
+    };
+    // The implementing method's own signature: if it doesn't match the declaration,
+    // rustc's E0053 points at both.
+    let params: Vec<PatType> = sig_m.params().cloned().collect();
+    let (names, decls) = plain_params(&params);
+    let ret = &sig_m.sig.output;
+    let body = match target {
+        Some(t) => quote!(#t(self #(, #names)*)),
+        None => quote!({ #(let _ = #names;)* ::core::unreachable!() }),
+    };
+    quote! {
+        #[inline]
+        fn #mname(&self #(, #decls)*) #ret { #body }
+    }
+}
+
+/// Supertraits of `t`'s trait: the parent class trait (or `ObjectClass`) and the traits of
+/// the interfaces it lists.
+fn supertraits(index: &Index, t: usize) -> TokenStream {
+    let class = &index.classes[t];
+    let mut supers = vec![match index.parent(t) {
+        Some(p) => {
+            let p = index::trait_name(&index.classes[p]);
+            quote!(#p)
+        }
+        None => quote!(::roost::ObjectClass),
+    }];
+    for i in &class.interfaces {
+        let i = index::trait_name(&index.classes[index.find(i).expect("resolved")]);
+        supers.push(quote!(#i));
+    }
+    for g in index.shared.iter().filter(|g| g.decls.contains(&t)) {
+        let s = index::shared_trait_name(index, g);
+        supers.push(quote!(#s));
+    }
+    quote!(#(#supers)+*)
+}
+
+/// The trait's own items: field accessors, and the methods `t` introduces.
+fn trait_items(index: &Index, t: usize) -> TokenStream {
+    let class = &index.classes[t];
+    let mut items = TokenStream::new();
+    for f in class.instance_fields() {
+        let acc = index::accessor_name(class, &f.name);
+        let ty = &f.ty;
+        items.extend(quote! {
+            #[doc(hidden)]
+            #[allow(non_snake_case, dead_code)]
+            fn #acc(&self) -> &::roost::gc::GcCell<#ty>;
+        });
+    }
+    for m in class.methods.iter().filter(|m| index.introduces(t, m)) {
+        if index.shared_of(t, m.name()).is_none() {
+            items.extend(method_decl(m));
+        }
+    }
+    items
+}
+
+/// `fn m(&self, ..) -> R;`, with the method's docs.
+fn method_decl(m: &Method) -> TokenStream {
+    let mname = m.name();
+    let docs = m.attrs.iter().filter(|a| is_doc(a));
+    let params: Vec<PatType> = m.params().cloned().collect();
+    let (_, decls) = plain_params(&params);
+    let ret = &m.sig.output;
+    quote! {
+        #(#docs)*
+        fn #mname(&self #(, #decls)*) #ret;
+    }
+}
+
+/// The traits of [`index::Shared`] methods.
+fn shared_traits(index: &Index) -> TokenStream {
+    let mut out = TokenStream::new();
+    for g in &index.shared {
+        let name = index::shared_trait_name(index, g);
+        let decl = index.virtual_method(g.decls[0], &g.name).expect("declared");
+        let item = method_decl(decl);
+        let doc = format!(
+            "`{}`, declared by {}: one trait, so that it isn't ambiguous where they meet.",
+            g.name,
+            g.decls
+                .iter()
+                .map(|&d| format!("`{}`", index.classes[d].name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        out.extend(quote! {
+            #[doc = #doc]
+            #[doc(hidden)]
+            #[allow(non_camel_case_types)]
+            pub trait #name: ::roost::ObjectClass {
+                #item
+            }
+        });
+    }
+    out
+}
+
+fn expand_interface(index: &Index, ii: usize, errors: &mut Vec<syn::Error>) -> TokenStream {
+    let iface = &index.classes[ii];
+    let vis = iface.access.to_rust();
+    let name = &iface.name;
+    let tr = index::trait_name(iface);
+    let attrs = &iface.attrs;
+    let supers = supertraits(index, ii);
+    let items = trait_items(index, ii);
+    let doc = format!(
+        "The interface `{name}`'s methods. Use the type `{name}` (`Ref<{name}>`); this trait is \
+         what makes it polymorphic."
+    );
+    let mut inherent = TokenStream::new();
+    for m in iface.methods.iter().filter(|m| !m.is_abstract()) {
+        inherent.extend(method(index, ii, m, errors));
+    }
+    quote! {
+        #(#attrs)*
+        #vis type #name = dyn #tr;
+
+        #[doc = #doc]
+        #vis trait #tr: #supers {
+            #items
+        }
+
+        impl dyn #tr {
+            #inherent
+        }
+    }
 }
 
 fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenStream {
     let class = &index.classes[ci];
+    if class.is_interface() {
+        return expand_interface(index, ci, errors);
+    }
     let chain: Vec<&Class> = index.chains[ci]
         .iter()
         .map(|&c| &index.classes[c])
@@ -124,48 +285,92 @@ fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> Token
     let name = &class.name;
     let name_str = name.to_string();
     let tr = index::trait_name(class);
-    let st = index::struct_name(class);
     let class_attrs = &class.attrs;
-
-    let supertrait = match index.parent(ci) {
-        Some(p) => {
-            let p = index::trait_name(&index.classes[p]);
-            quote!(#p)
-        }
-        None => quote!(::roost::Object),
-    };
-
-    // --- the trait: accessors for this class's fields, methods this class introduces.
-    let mut trait_items = TokenStream::new();
-    for f in &class.fields {
-        let acc = index::accessor_name(class, &f.name);
-        let ty = &f.ty;
-        trait_items.extend(quote! {
-            #[doc(hidden)]
-            #[allow(non_snake_case, dead_code)]
-            fn #acc(&self) -> &::roost::gc::GcCell<#ty>;
-        });
-    }
-    for m in class.methods.iter().filter(|m| index.introduces(ci, m)) {
-        let mname = m.name();
-        let docs = m.attrs.iter().filter(|a| is_doc(a));
-        let params: Vec<PatType> = m.params().cloned().collect();
-        let (_, decls) = plain_params(&params);
-        let ret = &m.sig.output;
-        trait_items.extend(quote! {
-            #(#docs)*
-            fn #mname(&self #(, #decls)*) #ret;
-        });
-    }
+    let supers = supertraits(index, ci);
+    let items = trait_items(index, ci);
     let trait_doc = format!(
         "The class `{name_str}`'s methods. Use the type `{name_str}` (`Ref<{name_str}>`); \
          this trait is what makes it polymorphic."
     );
 
+    // --- static fields: thread-locals, like the collector.
+    let statics = class.static_fields().map(|f| {
+        let key = index::static_name(class, &f.name);
+        let ty = &f.ty;
+        let docs = f.attrs.iter().filter(|a| is_doc(a));
+        let init = match &f.init {
+            Some(e) => quote_spanned!(e.span()=> #e),
+            None => quote_spanned!(ty.span()=> <#ty as ::core::default::Default>::default()),
+        };
+        quote! {
+            ::std::thread_local! {
+                #(#docs)*
+                #[allow(non_upper_case_globals, clippy::default_trait_access)]
+                static #key: ::roost::gc::GcCell<#ty> =
+                    ::roost::gc::GcCell::new({ let __roost_init: #ty = #init; __roost_init });
+            }
+        }
+    });
+
+    // --- inherent impl on `dyn DogClass`: constructor, method bodies, statics.
+    let mut inherent = TokenStream::new();
+    inherent.extend(constructor(index, ci, errors));
+    for m in class.methods.iter().filter(|m| !m.is_abstract()) {
+        inherent.extend(method(index, ci, m, errors));
+    }
+
+    let concrete = if class.abstract_.is_some() {
+        abstract_marker(class)
+    } else {
+        concrete_class(index, ci, &chain)
+    };
+
+    quote! {
+        #(#class_attrs)*
+        #vis type #name = dyn #tr;
+
+        #[doc = #trait_doc]
+        #vis trait #tr: #supers {
+            #items
+        }
+
+        #(#statics)*
+
+        #concrete
+
+        impl dyn #tr {
+            #inherent
+        }
+    }
+}
+
+/// `Shape::new(..)` on an abstract class: an error at the call, with this message.
+fn abstract_marker(class: &Class) -> TokenStream {
+    let marker = index::abstract_marker_name(class);
+    let msg = format!("cannot instantiate abstract class `{}`", class.name);
+    let label = format!("`{}` is abstract", class.name);
+    quote! {
+        #[doc(hidden)]
+        #[diagnostic::on_unimplemented(
+            message = #msg,
+            label = #label,
+            note = "create an instance of a concrete subclass instead"
+        )]
+        #[allow(non_camel_case_types)]
+        trait #marker {}
+    }
+}
+
+/// The struct for objects whose class is exactly `ci`, and its trait impls.
+fn concrete_class(index: &Index, ci: usize, chain: &[&Class]) -> TokenStream {
+    let class = &index.classes[ci];
+    let name_str = class.name.to_string();
+    let st = index::struct_name(class);
+
     // --- the struct: every field of every class in the chain, root first.
     let mut storage = Vec::new(); // (storage ident, type, initializer, docs)
     for c in chain.iter().rev() {
-        for f in &c.fields {
+        for f in c.instance_fields() {
             let init = match &f.init {
                 Some(e) => quote_spanned!(e.span()=> #e),
                 None => {
@@ -211,17 +416,31 @@ fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> Token
         unsafe_block(t_unroot),
     );
 
-    let cast_targets = chain.iter().map(|c| {
-        let t = index::trait_name(c);
+    let cast_targets = index.supertypes(ci).map(|t| {
+        let t = index::trait_name(&index.classes[t]);
         quote!(.offer::<dyn #t, _>(self))
     });
 
-    // --- one trait impl per class in the chain.
+    // `toString` / `equals` / `hashCode` overrides.
+    let object_overrides = index::OBJECT_METHODS.iter().filter_map(|m| {
+        let m = Ident::new(m, Span::call_site());
+        match index.resolve_impl(ci, &m) {
+            Some(Impl::Class(k)) => Some(forward(
+                index,
+                ci,
+                index.virtual_method(k, &m).expect("resolved"),
+            )),
+            _ => None,
+        }
+    });
+
+    // --- one trait impl per class in the chain and per interface.
     let mut trait_impls = TokenStream::new();
-    for (&ai, a) in index.chains[ci].iter().zip(&chain) {
+    for t in index.supertypes(ci) {
+        let a = &index.classes[t];
         let atr = index::trait_name(a);
         let mut items = TokenStream::new();
-        for f in &a.fields {
+        for f in a.instance_fields() {
             let acc = index::accessor_name(a, &f.name);
             let s = index::storage_name(a, &f.name);
             let ty = &f.ty;
@@ -229,52 +448,31 @@ fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> Token
                 fn #acc(&self) -> &::roost::gc::GcCell<#ty> { &self.#s }
             });
         }
-        for m in a.methods.iter().filter(|m| index.introduces(ai, m)) {
-            let mname = m.name();
-            let owner = index
-                .resolve_virtual(ci, mname)
-                .expect("an introduced method resolves");
-            let owner_class = &index.classes[owner];
-            let impl_m = owner_class
-                .methods
-                .iter()
-                .find(|om| om.is_virtual() && om.name() == mname)
-                .expect("resolve_virtual found it");
-            let otr = index::trait_name(owner_class);
-            let f = index::method_impl_name(mname);
-            // The overriding method's own signature: if it doesn't match the declaration,
-            // rustc's E0053 points at both.
-            let params: Vec<PatType> = impl_m.params().cloned().collect();
-            let (names, decls) = plain_params(&params);
-            let ret = &impl_m.sig.output;
-            items.extend(quote! {
-                #[inline]
-                fn #mname(&self #(, #decls)*) #ret {
-                    <dyn #otr>::#f(self #(, #names)*)
-                }
-            });
+        for m in a.methods.iter().filter(|m| index.introduces(t, m)) {
+            if index.shared_of(t, m.name()).is_none() {
+                items.extend(forward(index, ci, m));
+            }
         }
         trait_impls.extend(quote! {
             impl #atr for #st { #items }
         });
     }
-
-    // --- inherent impl on `dyn DogClass`: constructor, method bodies, statics.
-    let mut inherent = TokenStream::new();
-    inherent.extend(constructor(index, ci, errors));
-    for m in &class.methods {
-        inherent.extend(method(index, ci, m, errors));
+    let supertypes: Vec<usize> = index.supertypes(ci).collect();
+    for g in index
+        .shared
+        .iter()
+        .filter(|g| g.decls.iter().any(|d| supertypes.contains(d)))
+    {
+        let s = index::shared_trait_name(index, g);
+        let decl = index.virtual_method(g.decls[0], &g.name).expect("declared");
+        let item = forward(index, ci, decl);
+        trait_impls.extend(quote! {
+            impl #s for #st { #item }
+        });
     }
 
+    let tr = index::trait_name(class);
     quote! {
-        #(#class_attrs)*
-        #vis type #name = dyn #tr;
-
-        #[doc = #trait_doc]
-        #vis trait #tr: #supertrait {
-            #trait_items
-        }
-
         #[doc(hidden)]
         #[allow(non_snake_case, non_camel_case_types, dead_code)]
         struct #st {
@@ -292,6 +490,10 @@ fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> Token
             fn __roost_default() -> Self {
                 #st { #(#storage_inits,)* }
             }
+
+            fn __roost_new() -> ::roost::Ref<dyn #tr> {
+                ::roost::Ref::new(#st::__roost_default())
+            }
         }
 
         impl ::roost::gc::Finalize for #st {}
@@ -307,29 +509,25 @@ fn expand_class(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> Token
             }
         }
 
-        impl ::roost::Object for #st {
+        impl ::roost::ObjectClass for #st {
             fn __roost_casts(&self, req: &mut ::roost::CastRequest<'_>) {
                 req.offer_class(self)
                     #(#cast_targets)*
-                    .offer::<dyn ::roost::Object, _>(self);
+                    .offer::<dyn ::roost::ObjectClass, _>(self);
             }
             fn class_name(&self) -> &'static str {
                 #name_str
             }
+            #(#object_overrides)*
         }
 
         #trait_impls
-
-        impl dyn #tr {
-            #inherent
-        }
     }
 }
 
 fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenStream {
     let class = &index.classes[ci];
     let tr = index::trait_name(class);
-    let st = index::struct_name(class);
     let construct = Ident::new(index::CONSTRUCT, Span::call_site());
 
     let (attrs, access, params, mut body, span) = match &class.ctor {
@@ -350,7 +548,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
     };
     let vis = access.to_rust();
     let super_call = take_super_call(&mut body);
-    let body = rewrite_body(index, ci, &body, errors);
+    let (body, ctor_allow) = rewrite_body(index, ci, true, &body, errors);
 
     let super_stmt = match (index.parent(ci), super_call) {
         (Some(p), Some((sspan, mut args))) => {
@@ -358,6 +556,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
             let mut rw = Rewriter {
                 index,
                 class: ci,
+                has_this: true,
                 errors,
             };
             for a in args.iter_mut() {
@@ -417,14 +616,45 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
             decl.clone()
         }
     });
+    let new_decls: Vec<TokenStream> = new_decls.collect();
     let stmts = &body.stmts;
-    let doc = format!(
-        "`new {}(..)`: allocates the object, then runs the constructors.",
-        class.name
-    );
+    let new = if class.abstract_.is_some() {
+        // Never callable: the bound fails at the call site with the marker's message. (The
+        // lifetime keeps the bound from being "trivially false" at the definition.)
+        let marker = index::abstract_marker_name(class);
+        quote! {
+            #[doc(hidden)]
+            #[allow(private_bounds, unused_variables, clippy::new_ret_no_self)]
+            #vis fn new<'__roost>(#(#new_decls),*) -> ::roost::Ref<dyn #tr>
+            where
+                &'__roost (): #marker,
+            {
+                ::core::unreachable!()
+            }
+        }
+    } else {
+        let st = index::struct_name(class);
+        let doc = format!(
+            "`new {}(..)`: allocates the object, then runs the constructors.",
+            class.name
+        );
+        quote! {
+            #[doc = #doc]
+            #(#attrs)*
+            #[allow(clippy::new_ret_no_self)]
+            #vis fn new(#(#new_decls),*) -> ::roost::Ref<dyn #tr> {
+                // Java order: every field gets its default first, then the constructors run
+                // root-first, with `this` already the complete (most-derived) object.
+                let object = #st::__roost_new();
+                <dyn #tr>::#construct(&*object #(, #names)*);
+                object
+            }
+        }
+    };
     quote! {
         #[doc(hidden)]
         #[allow(clippy::used_underscore_binding)]
+        #ctor_allow
         fn #construct<T: ?Sized + #tr>(this: &T #(, #ctor_params)*) {
             let _ = this;
             #(#conversions)*
@@ -432,16 +662,7 @@ fn constructor(index: &Index, ci: usize, errors: &mut Vec<syn::Error>) -> TokenS
             #(#stmts)*
         }
 
-        #[doc = #doc]
-        #(#attrs)*
-        #[allow(clippy::new_ret_no_self)]
-        #vis fn new(#(#new_decls),*) -> ::roost::Ref<dyn #tr> {
-            // Java order: every field gets its default first, then the constructors run
-            // root-first, with `this` already the complete (most-derived) object.
-            let object = ::roost::Ref::new(#st::__roost_default());
-            <dyn #tr>::#construct(&*object #(, #names)*);
-            object
-        }
+        #new
     }
 }
 
@@ -451,11 +672,17 @@ fn method(index: &Index, ci: usize, m: &Method, errors: &mut Vec<syn::Error>) ->
     let params = m.params();
     let ret: &ReturnType = &m.sig.output;
     let attrs = m.attrs.iter().filter(|a| !is_doc(a) || m.is_static);
+    let body = m
+        .body
+        .as_ref()
+        .expect("abstract methods have no body to generate");
     if m.is_static {
         let vis = m.access.to_rust();
-        let (mname, body) = (m.name(), &m.body);
+        let mname = m.name();
+        let (body, allow) = rewrite_body(index, ci, false, body, errors);
         return quote! {
             #(#attrs)*
+            #allow
             #vis fn #mname(#(#params),*) #ret #body
         };
     }
@@ -464,11 +691,12 @@ fn method(index: &Index, ci: usize, m: &Method, errors: &mut Vec<syn::Error>) ->
     } else {
         index::method_impl_name(m.name())
     };
-    let body = rewrite_body(index, ci, &m.body, errors);
+    let (body, allow) = rewrite_body(index, ci, true, body, errors);
     let stmts = &body.stmts;
     quote! {
         #[doc(hidden)]
         #(#attrs)*
+        #allow
         fn #f<T: ?Sized + #tr>(this: &T #(, #params)*) #ret {
             let _ = this;
             #(#stmts)*

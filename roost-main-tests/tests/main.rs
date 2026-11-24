@@ -83,6 +83,25 @@ fn borrow_conflict_is_reported_like_a_java_exception() {
 }
 
 #[test]
+fn borrow_conflict_on_a_static_field_names_the_declaring_class() {
+    let (stdout, stderr) = run_expecting(env!("CARGO_BIN_EXE_borrow_conflict_static"), 1);
+    assert_eq!(stdout, "");
+    let first = stderr.lines().next().unwrap_or_default();
+    // Read as `Dog::count`, declared by Animal: reported as `Animal.count`.
+    assert!(
+        first.starts_with(
+            "Exception in thread \"main\" roost.BorrowConflict: field Animal.count cannot be \
+             written while it is being read"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("src/bin/borrow_conflict_static.rs:"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn other_panics_keep_the_default_report() {
     let (_, stderr) = run_expecting(env!("CARGO_BIN_EXE_plain_panic"), 101);
     assert!(stderr.contains("thread 'main'"), "{stderr}");

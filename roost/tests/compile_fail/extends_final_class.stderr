@@ -1,0 +1,5 @@
+error: cannot inherit from final class `Leaf`
+ --> tests/compile_fail/extends_final_class.rs:5:26
+  |
+5 |     class Branch extends Leaf {}
+  |                          ^^^^

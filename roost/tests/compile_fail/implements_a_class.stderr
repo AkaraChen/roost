@@ -1,0 +1,11 @@
+error: `Pet` is an interface: write `implements Pet`
+ --> tests/compile_fail/implements_a_class.rs:7:23
+  |
+7 |     class Cat extends Pet {}
+  |                       ^^^
+
+error: `Animal` is a class: write `extends Animal`
+ --> tests/compile_fail/implements_a_class.rs:6:26
+  |
+6 |     class Dog implements Animal {}
+  |                          ^^^^^^

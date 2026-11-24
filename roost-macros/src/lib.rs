@@ -97,7 +97,7 @@ mod tests {
                 class A { public fn f() {} }
                 class B extends A { @Override public fn g() {} }
             },
-            "method `g` does not override a method from a superclass",
+            "method `g` does not override or implement a method",
         );
         assert_error(
             quote! {
@@ -187,9 +187,68 @@ mod tests {
             "methods take no `self` parameter",
         );
         assert_error(
+            quote! { class A { public fn class_name() -> String { String::new() } } },
+            "`class_name` is reserved",
+        );
+        assert_error(
             quote! { class A { public fn to_string() -> String { String::new() } } },
+            "overrides `Object.to_string` but is not marked @Override",
+        );
+    }
+
+    #[test]
+    fn interfaces_abstract_final_static() {
+        let errs = errors(quote! {
+            interface Named { fn name() -> String; }
+            interface Pet extends Named { default fn greet() -> String { this.name() } }
+            abstract class A implements Pet { static n: i32; public abstract fn f(); }
+            final class B extends A {
+                @Override public fn name() -> String { String::new() }
+                @Override public fn f() { A::n += 1; Self::n = 0; }
+            }
+        });
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_error(
+            quote! {
+                interface Named { fn name() -> String; }
+                interface Pet extends Named { fn name() -> String; }
+            },
+            "`name` is already declared in super-interface `Named`",
+        );
+        assert_error(
+            quote! { interface A extends B {} interface B extends A {} },
+            "cyclic inheritance",
+        );
+        assert_error(
+            quote! { class A { private static n: i32; } class B extends A { public fn f() -> i32 { A::n } } },
+            "static field `n` is private to class `A`",
+        );
+        assert_error(
+            quote! { class A { static n: i32; public fn f() -> i32 { this.n } } },
+            "`n` is a static field of `A`",
+        );
+        assert_error(
+            quote! {
+                abstract class A { public fn f() {} }
+                abstract class B extends A { @Override public abstract fn f(); }
+            },
+            "abstract method `f` cannot re-declare `A.f`",
+        );
+        assert_error(
+            quote! {
+                abstract class A { public abstract fn f(); }
+                class B extends A { @Override public fn f() { super.f(); } }
+            },
+            "`A.f` is abstract: it cannot be called with `super`",
+        );
+        assert_error(
+            quote! { interface I { fn to_string() -> String; } },
             "`to_string` is reserved",
         );
+        let out = expand_class(quote! { class Box<T> {} }).to_string();
+        assert!(out.contains("generic classes are not supported"), "{out}");
+        let out = expand_class(quote! { abstract final class A {} }).to_string();
+        assert!(out.contains("both `abstract` and `final`"), "{out}");
     }
 
     #[test]

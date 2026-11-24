@@ -2,7 +2,7 @@
 //!
 //! The problem: given a `Ref<dyn Animal>` pointing at a `Puppy`, produce a `Ref<dyn Dog>`.
 //! That needs `Puppy`'s vtable *for `dyn Dog`*, and only code that knows the concrete type
-//! `Puppy` can name it. So the cast is a virtual call ([`Object::__roost_casts`]) into the
+//! `Puppy` can name it. So the cast is a virtual call ([`ObjectClass::__roost_casts`]) into the
 //! concrete class, which "offers" itself as each type it can be viewed as; the request
 //! keeps the offer whose type is the one asked for.
 //!
@@ -19,9 +19,9 @@
 use std::any::{Any, TypeId};
 use std::marker::Unsize;
 
-use crate::object::Object;
+use crate::object::ObjectClass;
 
-/// A pending `cast::<U>()` / `instance_of::<U>()`, handed to [`Object::__roost_casts`].
+/// A pending `cast::<U>()` / `instance_of::<U>()`, handed to [`ObjectClass::__roost_casts`].
 pub struct CastRequest<'a> {
     /// `&mut Option<*const U>` for the requested `U`.
     slot: &'a mut dyn Any,
@@ -42,7 +42,7 @@ impl<'a> CastRequest<'a> {
     pub fn offer<U, C>(&mut self, this: &C) -> &mut Self
     where
         U: ?Sized + 'static,
-        C: Object + Unsize<U>,
+        C: ObjectClass + Unsize<U>,
     {
         let as_u: &U = this;
         // Explicit turbofish: left to inference, `this` (an argument, hence a coercion site)
@@ -51,11 +51,11 @@ impl<'a> CastRequest<'a> {
     }
 
     /// Offers `this` as its own concrete class (`Ref<Puppy>`).
-    pub fn offer_class<C: Object>(&mut self, this: &C) -> &mut Self {
+    pub fn offer_class<C: ObjectClass>(&mut self, this: &C) -> &mut Self {
         self.fill::<C, C>(this, this)
     }
 
-    fn fill<U: ?Sized + 'static, C: Object>(&mut self, as_u: &U, this: &C) -> &mut Self {
+    fn fill<U: ?Sized + 'static, C: ObjectClass>(&mut self, as_u: &U, this: &C) -> &mut Self {
         if let Some(slot @ None) = self.slot.downcast_mut::<Option<*const U>>() {
             *slot = Some(as_u);
             self.source = Some((TypeId::of::<C>(), (this as *const C).cast()));
@@ -73,7 +73,7 @@ impl<'a> CastRequest<'a> {
 mod tests {
     use crate::gc::{self, Counter, Finalize, GcCell, Trace};
     use crate::test_classes::*;
-    use crate::{CastRequest, Object, Ref};
+    use crate::{CastRequest, Object, ObjectClass, Ref};
 
     #[test]
     fn cast_to_a_non_leaf_class_trait() {
@@ -117,11 +117,11 @@ mod tests {
 
     #[test]
     fn cast_from_the_root_and_upcasts() {
-        let o: Ref<dyn Object> = puppy("Rex");
+        let o: Ref<Object> = puppy("Rex");
         assert_eq!(o.cast::<dyn Dog>().unwrap().fetch(), "Rex fetches clumsily");
         assert_eq!(o.cast::<dyn Animal>().unwrap().speak(), "Rex says yip");
         let d: Ref<dyn Dog> = o.cast::<dyn Dog>().unwrap();
-        assert!(d.cast::<dyn Object>().is_some());
+        assert!(d.cast::<Object>().is_some());
         assert!(d.cast::<Puppy>().is_some());
     }
 
@@ -131,7 +131,7 @@ mod tests {
         assert!(p.instance_of::<Puppy>());
         assert!(p.instance_of::<dyn Dog>());
         assert!(p.instance_of::<dyn Animal>());
-        assert!(p.instance_of::<dyn Object>());
+        assert!(p.instance_of::<Object>());
         assert!(!p.instance_of::<Mutt>());
         assert!(!p.instance_of::<Cat>());
 
@@ -183,31 +183,29 @@ mod tests {
         twin: GcCell<Option<Ref<Liar>>>,
     }
 
-    impl Object for Liar {
+    impl ObjectClass for Liar {
         fn __roost_casts(&self, req: &mut CastRequest<'_>) {
             match &*self.twin.borrow() {
                 // Right class, wrong object.
-                Some(twin) => req
-                    .offer_class::<Liar>(twin)
-                    .offer::<dyn Object, _>(&**twin),
+                Some(twin) => req.offer_class::<Liar>(twin).offer::<Object, _>(&**twin),
                 // An embedded object at a different address and of a different class.
                 None => req
                     .offer::<dyn Animal, _>(&self.inner)
-                    .offer::<dyn Object, _>(self),
+                    .offer::<Object, _>(self),
             };
         }
     }
 
     #[test]
     fn dishonest_offers_are_ignored() {
-        let liar: Ref<dyn Object> = Ref::new(Liar {
+        let liar: Ref<Object> = Ref::new(Liar {
             inner: Cat { name: "Tom".into() },
             twin: GcCell::new(None),
         });
         assert!(liar.cast::<dyn Animal>().is_none());
         assert!(!liar.instance_of::<dyn Animal>());
         // The honest offer still works.
-        assert!(liar.cast::<dyn Object>().is_some());
+        assert!(liar.cast::<Object>().is_some());
 
         let other = Ref::new(Liar {
             inner: Cat { name: "Kit".into() },
@@ -219,11 +217,11 @@ mod tests {
             inner: Cat { name: "Tom".into() },
             twin: GcCell::new(Some(other.clone())),
         });
-        let as_obj: Ref<dyn Object> = liar2.clone();
+        let as_obj: Ref<Object> = liar2.clone();
         assert!(
             as_obj.cast::<Liar>().is_none(),
             "offered its twin, not itself"
         );
-        assert!(as_obj.cast::<dyn Object>().is_none());
+        assert!(as_obj.cast::<Object>().is_none());
     }
 }

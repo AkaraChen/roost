@@ -1,0 +1,5 @@
+error: there is no `this` in a static method
+ --> tests/compile_fail/this_in_static_method.rs:7:46
+  |
+7 |         public static fn get() -> i32 { this.count + Self::total }
+  |                                              ^^^^^

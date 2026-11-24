@@ -29,7 +29,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
+      # Includes the trybuild compile-fail suite (roost/tests/compile_fail.rs), whose
+      # .stderr snapshots are pinned to the toolchain in rust-toolchain.toml.
+      - name: cargo test (incl. trybuild compile-fail)
         run: cargo test --workspace
 
       - name: cargo run --example spike
@@ -37,6 +39,9 @@ jobs:
 
       - name: cargo run --example zoo
         run: cargo run -p roost --example zoo
+
+      - name: cargo run --example shapes
+        run: cargo run -p roost --example shapes
 
       # The spike's cycle tests must depend on the collector. With every collection turned
       # into a no-op they have to fail; if they pass, the assertions don't bite.
@@ -66,3 +71,4 @@ jobs:
           rustup component add miri rust-src
           cargo miri test -p roost --lib
           cargo miri test -p roost --test class
+          cargo miri test -p roost --test oop

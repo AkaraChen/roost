@@ -1,0 +1,21 @@
+error[E0053]: method `age` has an incompatible type for trait
+ --> tests/compile_fail/interface_method_wrong_signature.rs:6:38
+  |
+3 | class! {
+...
+6 |         @Override public fn age() -> String { "three".into() }
+  |                                      ^^^^^^ expected `i32`, found `String`
+  |
+note: type in trait
+ --> tests/compile_fail/interface_method_wrong_signature.rs:4:33
+  |
+3 | class! {
+4 |     interface Pet { fn age() -> i32; }
+  |                                 ^^^
+  = note: expected signature `fn(&__RoostDog) -> i32`
+             found signature `fn(&__RoostDog) -> String`
+help: change the output type to match the trait
+  |
+6 -         @Override public fn age() -> String { "three".into() }
+6 +         @Override public fn age() -> i32 { "three".into() }
+  |

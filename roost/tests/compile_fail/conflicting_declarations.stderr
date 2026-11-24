@@ -1,0 +1,55 @@
+error: `Book.title` and `Titled.title` must have the same signature: a class implements both with one method
+ --> tests/compile_fail/conflicting_declarations.rs:5:28
+  |
+5 |     class Book { public fn title() -> i32 { 1 } }
+  |                            ^^^^^
+
+error: the other declaration
+ --> tests/compile_fail/conflicting_declarations.rs:4:27
+  |
+4 |     interface Titled { fn title() -> String; }
+  |                           ^^^^^
+
+error[E0053]: method `title` has an incompatible type for trait
+ --> tests/compile_fail/conflicting_declarations.rs:5:39
+  |
+3 | class! {
+4 |     interface Titled { fn title() -> String; }
+5 |     class Book { public fn title() -> i32 { 1 } }
+  |                                       ^^^ expected `String`, found `i32`
+  |
+note: type in trait
+ --> tests/compile_fail/conflicting_declarations.rs:4:38
+  |
+3 | class! {
+4 |     interface Titled { fn title() -> String; }
+  |                                      ^^^^^^
+  = note: expected signature `fn(&__RoostBook) -> String`
+             found signature `fn(&__RoostBook) -> i32`
+help: change the output type to match the trait
+  |
+5 -     class Book { public fn title() -> i32 { 1 } }
+5 +     class Book { public fn title() -> String { 1 } }
+  |
+
+error[E0053]: method `title` has an incompatible type for trait
+ --> tests/compile_fail/conflicting_declarations.rs:5:39
+  |
+3 | class! {
+4 |     interface Titled { fn title() -> String; }
+5 |     class Book { public fn title() -> i32 { 1 } }
+  |                                       ^^^ expected `String`, found `i32`
+  |
+note: type in trait
+ --> tests/compile_fail/conflicting_declarations.rs:4:38
+  |
+3 | class! {
+4 |     interface Titled { fn title() -> String; }
+  |                                      ^^^^^^
+  = note: expected signature `fn(&__RoostNovel) -> String`
+             found signature `fn(&__RoostNovel) -> i32`
+help: change the output type to match the trait
+  |
+5 -     class Book { public fn title() -> i32 { 1 } }
+5 +     class Book { public fn title() -> String { 1 } }
+  |
