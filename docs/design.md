@@ -62,7 +62,7 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
   被释放的次数。不是线程本地全局量，每个测试自己 new 一个。
 
 `Ref::upcast` 是表达式里的显式向上转型。`roost::__private` 只给生成代码用：`field` / `get` / `set` /
-`get_static` / `set_static`（字段 / 静态字段读写，各自只在函数内部短借用，冲突时抛 `roost.BorrowConflict`），
+`get_static` / `set_static`（字段 / 静态字段读写，各自只在函数内部短借用，冲突时抛 `roost.BorrowConflict`，消息里是声明这个字段的类名，如 `Animal.name` / `Animal.count`），
 `assert_trace` 和 `TraceField`（见「编译期诊断」），`ReadOnlyCopyOfField`（字段上的方法调用的接收者）。
 `roost::prelude` 导出 `Ref`、`Object`、`ObjectClass`、`class!`、`new!`。
 
@@ -152,10 +152,16 @@ Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地�
   根类的字段先求值），然后从根类到子类依次执行构造器体。`super(..)` 只能是构造器第一条语句；不写就隐式
   `super()`，父类没有无参构造器时报错。构造器里的虚调用落到子类，子类字段此时是默认值（和 Java 一样）。
   测试：`virtual_call_in_a_constructor_lands_in_the_subclass`。
-- **字段访问**：`this.f` 读 → `get(cell)`，在一次短借用里 **clone** 出来；`this.f = e` → `set(cell, e)`；
+- **字段访问**：`this.f` 读 → `get(field(cell, "Owner", "f"))`，在一次短借用里 **clone** 出来；`this.f = e` → `set(..)`；
   `this.f op= e` → 读出、算右边、写回（Java 的求值顺序：右边的副作用对这个字段的写会被覆盖，有测试）。
   guard 从不离开这两个辅助函数，所以「基类拿着 borrow_mut 调虚方法，子类覆盖去读同一字段」的 panic
   **在结构上不可能发生**（`base_method_calling_an_override_that_touches_the_same_field_does_not_panic`）。
+  剩下唯一能冲突的情形是用户代码在一次字段访问**之中**运行：字段类型自定义的 `Clone` 回调到对象、写同一个字段
+  （`roost-main-tests/src/bin/borrow_conflict.rs`）。这时抛 `roost.BorrowConflict: field Animal.name ...`，
+  类名是**声明**这个字段的类。静态字段一样：`get_static(&KEY, "Animal", "count")` / `set_static(..)` 也走
+  `field` + `get` / `set`，以 `Dog::count` 读到的 Animal 的静态字段报成 `Animal.count`，位置是用户那一行
+  （cell 从 `LocalKey::with` 里取出来再用，闭包会吞掉 `#[track_caller]` 的位置；
+  `roost-main-tests/src/bin/borrow_conflict_static.rs`）。
   格式化宏（`format!(.., this.name)`）里的字段读也会改写。
 - **方法默认是虚方法**（public / protected / 包级），`private` 方法不是虚方法（不进 vtable，子类同名方法是新方法），
   `static` 方法也不是。

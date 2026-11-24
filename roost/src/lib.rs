@@ -370,6 +370,21 @@ pub mod __private {
     /// A static field: a thread-local `GcCell` (the collector is thread-local too).
     pub type Static<T> = std::thread::LocalKey<GcCell<T>>;
 
+    /// This thread's cell of a static field.
+    ///
+    /// Taken out of `LocalKey::with` rather than used inside its closure so that `get` /
+    /// `set` are called directly from the `#[track_caller]` accessors below: a borrow
+    /// conflict is then reported at the user's `Class::field`, not inside `std` (neither a
+    /// closure nor `with` forwards the caller location).
+    fn static_cell<T: Trace>(key: &'static Static<T>) -> &'static GcCell<T> {
+        let cell: *const GcCell<T> = key.with(std::ptr::from_ref);
+        // SAFETY: a thread-local lives until its thread exits. The `'static` is wider than
+        // that, so this stays private: its only callers (the two accessors below) use the
+        // reference right away, on the thread that owns the value, and never keep it. (`with`
+        // panics if the value is already destroyed, so it never points to a dead value.)
+        unsafe { &*cell }
+    }
+
     /// A static field read: a copy, like [`get`].
     #[inline]
     #[track_caller]
@@ -378,7 +393,7 @@ pub mod __private {
         class: &'static str,
         name: &'static str,
     ) -> T {
-        key.with(|cell| get(field(cell, class, name)))
+        get(field(static_cell(key), class, name))
     }
 
     /// A static field write, like [`set`].
@@ -390,7 +405,7 @@ pub mod __private {
         name: &'static str,
         value: T,
     ) {
-        key.with(|cell| set(field(cell, class, name), value));
+        set(field(static_cell(key), class, name), value);
     }
 
     pub use crate::object::{default_to_string, identity_equals, identity_hash_code};
