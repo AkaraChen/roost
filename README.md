@@ -4,34 +4,82 @@ An experiment: a Java-like object model for Rust — classes, field inheritance,
 methods dispatched through a vtable, and instanceof-style downcasting — on top of a tracing
 garbage collector, all behind macros.
 
-Status: **spike**. Nothing here is an API yet. The macros are deliberately crude `macro_rules!`.
+Status: **foundations**. The runtime primitives exist and are tested; the class DSL
+(`roost::class!`) is still a placeholder. The first spike lives on as a regression suite.
 
 ```sh
-cargo run    # walks through the five demos
-cargo test   # asserts them
+cargo test                              # runtime unit tests + spike + doctests
+cargo run -p roost --example spike      # walks through the spike's five demos
+cargo miri test -p roost --lib          # the runtime's unsafe code under Miri
 ```
 
 ## 工具链
 
-- `gc = { version = "0.5.1", features = ["derive", "nightly"] }`。`Gc<dyn Animal>` 只在 gc 的
-  `nightly` feature 下存在（`CoerceUnsized` / `DispatchFromDyn` / `Unsize`）。
-- `rust-toolchain.toml` 钉在 **`nightly-2026-08-20`**，这不是随便挑的：gc 0.5.1 的 `nightly`
-  feature 在新 nightly 上**编译不过**（gc 自己的 `GcBox::from_box` 里
-  `error[E0606]: casting *mut dyn Trace as *mut GcBox<T> is invalid`）。二分结果：
-  `2026-08-20` 能编，`2026-08-27` 起（含 `2026-11-20`）编不过。
-- 我们自己额外开了 `#![feature(arbitrary_self_types)]`（为了 `self: Gc<Self>`，见下文问题 2）；
-  测试里额外用了 `ptr_metadata`（只为读出 vtable 指针做断言）。
+- 钉在 **`nightly-2026-11-23`**（`rust-toolchain.toml`），fmt / clippy / test / Miri 都在它上面验证过。
+  不再被 gc 卡住，可以随时往后升：升完跑一遍 CI 的全部步骤即可。
+- gc 用的是 **vendor 进来并打过补丁的 gc 0.5.1 / gc_derive 0.5.0**（`vendor/`，说明见
+  [`vendor/README.md`](vendor/README.md)）。原版 gc 0.5.1 的 `nightly` feature 从 nightly-2026-08-27 起
+  编不过（`GcBox::from_box` 里 E0606），上游 master 也没修；补丁是一行类型标注。另外把 gc_derive 升到
+  synstructure 0.13，`#[derive(Trace)]` 不再报 `non_local_definitions`。哪些补丁能回馈上游见
+  [`UPSTREAM.md`](UPSTREAM.md)。
+- `Gc<dyn Trait>` 只在 gc 的 `nightly` feature 下存在（`CoerceUnsized` / `DispatchFromDyn` / `Unsize`）。
+  roost 自己开了 `coerce_unsized`、`dispatch_from_dyn`、`unsize`（给 `Ref<T>` 同样的能力）和
+  `set_ptr_value`（`Ref::cast` 里重建胖指针）。
 - CI 会检查 `rustc -V` 确实是 nightly。
 
 ## 结构
 
+cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings` 去查上游代码），CI 单独跑它的测试。
+
+| 路径 | 内容 |
+| --- | --- |
+| `roost/` | 运行时，见下 |
+| `roost-macros/` | proc-macro。`class!` 目前只是占位：任何调用都是一个指向调用处的 `compile_error!` |
+| `roost/tests/spike.rs` | 第一棒 spike 的测试（五件事 + GcCell 冲突的证据），原样保留 |
+| `roost/tests/spike/` | spike 的对象模型：`object.rs`（`base_class!` / `derived_class!`）、`zoo.rs`、`probe.rs` |
+| `roost/examples/spike.rs` | spike 的演示，和测试共用 `tests/spike/` 下的模块 |
+| `vendor/gc`，`vendor/gc_derive` | 打过补丁的 gc |
+
+### `roost` 运行时
+
+后面 `class!` 生成的代码就建在这几样东西上。都有单元测试（`roost/src/*.rs` 里的 `mod tests`，用的类层次
+`roost/src/test_classes.rs` 是手写的「宏大概会生成成这样」：`Animal` → `Dog`（非叶子）→ `Puppy`，以及 `Cat`）。
+
+- **`Ref<T: ?Sized>`**：包一个 `Gc<T>`。`Clone`（复制引用，不复制对象）、`Deref`；`Ref<Puppy>` 能隐式转成
+  `Ref<dyn Dog>` / `Ref<dyn Animal>` / `Ref<dyn Object>`（`CoerceUnsized`，trait 之间靠 trait upcasting）；
+  `DispatchFromDyn`，所以类 trait 里可以写 `self: Ref<Self>` 的方法。`Ref::ptr_eq` 是 Java 的引用 `==`，
+  两边静态类型可以不同，只比地址不比 vtable。故意没有 `PartialEq`。`Display` / `Debug` 走 `Object::to_string`。
+- **`Object`**：根类 trait。`to_string`（默认 `类名@十六进制hash`）、`hash_code`（按地址的 identity hash，
+  gc 不移动对象所以稳定）、`equals`（默认 identity）、`class_name`，都有默认实现。`Any` 支持：`AsAny` 是
+  `Object` 的父 trait，`animal.as_any()` 经过 vtable 拿到具体类的 `&dyn Any`。
+- **`instance_of` / `cast`**：`r.instance_of::<dyn Dog>()`，`r.cast::<dyn Dog>() -> Option<Ref<dyn Dog>>`，
+  失败返回 `None`。目标可以是具体类，也可以是**非叶子类的 trait object**（`Ref<dyn Animal>` → `Ref<dyn Dog>`，
+  spike 做不到这个）。做法：`cast` 虚调用 `Object::__roost_casts`，具体类在里面把自己作为它能被看成的每个类型
+  「报上来」（`req.offer_class(self).offer::<dyn Dog, _>(self)...`，以后由宏生成），只有类型匹配的那一项被采用。
+  这个方法是 safe 的，写错了也不会 UB：`cast` 会核对报上来的指针确实来自这个对象本身（同一地址、同一个运行期
+  类型），否则当作失败（有测试故意「撒谎」）。
+- **`roost::gc`**：`collect()`（立刻全量回收），gc 类型的 re-export，以及测试辅助 `Counter` / `Probe`：
+  把 `counter.probe()` 放进对象的字段，`counter.finalized()` / `counter.dropped()` 就是这些对象被 finalize /
+  被释放的次数。不是线程本地全局量，每个测试自己 new 一个。
+
+已知的、留给后面的：
+
+- `#[derive(Trace)]` 展开成 `::gc::Trace`，所以用它的 crate 必须直接依赖 `gc`（名字就叫 `gc`）。宏生成代码
+  时应该改成经由 `roost` 的路径（比如 `::roost::__private::gc`），这得改 gc_derive 或者由 `class!` 自己生成
+  `Trace` impl。
+- `Object::__roost_casts` 要列出所有祖先类的 trait，手写容易漏（漏了只是 cast 失败，不会 UB）。宏来生成。
+
+## 第一棒 spike（PR #1）
+
+下面是第一棒的记录，代码路径已更新到新位置。当时 gc 还没 vendor，toolchain 钉在 nightly-2026-08-20。
+
 | 文件 | 内容 |
 | --- | --- |
-| `src/object.rs` | `Object` / `Class` trait、`GcExt::{is, cast}`，以及 `base_class!` / `derived_class!` 两个宏 |
-| `src/zoo.rs` | 用宏写出来的 `Animal`（根类）→ `Dog` |
-| `src/probe.rs` | 线程本地的 drop / finalize 计数器 |
-| `tests/spike.rs` | 五件事的断言 + GcCell 冲突的证据 |
-| `src/main.rs` | `cargo run` 演示 |
+| `roost/tests/spike/object.rs` | `Object` / `Class` trait、`GcExt::{is, cast}`，以及 `base_class!` / `derived_class!` 两个宏 |
+| `roost/tests/spike/zoo.rs` | 用宏写出来的 `Animal`（根类）→ `Dog` |
+| `roost/tests/spike/probe.rs` | 线程本地的 drop / finalize 计数器 |
+| `roost/tests/spike.rs` | 五件事的断言 + GcCell 冲突的证据 |
+| `roost/examples/spike.rs` | `cargo run -p roost --example spike` 演示 |
 
 `base_class!` 对 `Animal` 生成：
 
@@ -45,7 +93,7 @@ cargo test   # asserts them
 `derived_class!` 生成 `struct Dog { pub base: AnimalBase, breed }`（字段包含式继承），并且
 `impl Animal for Dog`：被覆盖的方法用用户写的方法体，没覆盖的沿用默认实现。
 
-## 五件事，以及证据在哪
+### 五件事，以及证据在哪
 
 | # | 内容 | 测试 |
 | --- | --- | --- |
@@ -77,15 +125,15 @@ roost::speak_via_vtable:
 测试里的 `collect()` 会看环境变量 `ROOST_SKIP_COLLECT`，设了就什么都不做：
 
 ```sh
-ROOST_SKIP_COLLECT=1 cargo test --test spike five_   # 两个环测试都失败
+ROOST_SKIP_COLLECT=1 cargo test -p roost --test spike five_   # 两个环测试都失败
 ```
 
 CI 里有一步专门跑这条命令，**要求它失败**。直接把 `collect();` 那一行删掉也验证过，同样失败
 （`both objects finalized: left 0, right 2`）。
 
-## 实践下来真正难的地方
+### 实践下来真正难的地方
 
-### 1. 字段可变性：GcCell 的 borrow 冲突多容易撞上？撞上 panic 能接受吗？
+#### 1. 字段可变性：GcCell 的 borrow 冲突多容易撞上？撞上 panic 能接受吗？
 
 每个可变字段各用一个 `GcCell`（`name: GcCell<String>`、`friend: GcCell<Option<Gc<dyn Animal>>>`）。
 写这个 spike 的时候我没有*意外*撞上冲突；测试里的两个 panic 是我刻意构造的，但写法都是最顺手的那种：
@@ -102,7 +150,7 @@ CI 里有一步专门跑这条命令，**要求它失败**。直接把 `collect(
   如果把 guard 绑到 `let` 上，自己和自己交朋友就会 panic。
 
 panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**第二次**借用的那一行
-（`src/zoo.rs` 里 `Dog::on_renamed`），而不是一直拿着 `borrow_mut` 的那一帧。要找到真正的「持有者」得开
+（`roost/tests/spike/zoo.rs` 里 `Dog::on_renamed`），而不是一直拿着 `borrow_mut` 的那一帧。要找到真正的「持有者」得开
 `RUST_BACKTRACE=1`，在栈里往上翻到 `animal_super::rename_holding_borrow::<Dog>`。
 
 能不能接受：作为 spike，能定位、能修（把 guard 的作用域缩到调用之前，见 `rename`）。作为「像 Java
@@ -110,7 +158,7 @@ panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**�
 下一棒建议让宏生成 `get_name() -> String` / `set_name(v)` 这类**不把 guard 交给用户**的访问器，
 使借用永远不跨越方法调用；需要原地改大字段的场景再单独开口子。
 
-### 2. `this` 的类型：最后写成什么样？`&self` 和 `this: &Gc<dyn X>` 哪个顺手？
+#### 2. `this` 的类型：最后写成什么样？`&self` 和 `this: &Gc<dyn X>` 哪个顺手？
 
 最终签名：
 
@@ -131,7 +179,7 @@ panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**�
 结论：`&self` 明显更顺手，`Gc<Self>` 只在「this 要逃逸出去」的时候用；宏里这两种接收者只能拆成
 `methods { }` / `gc_methods { }` 两段，因为 `macro_rules!` 的重复块里没法在 `&this` 和 `this` 之间二选一。
 
-### 3. super 调用和「构造器里调用被子类覆盖的方法」：宏藏住了多少，还剩哪些陷阱？
+#### 3. super 调用和「构造器里调用被子类覆盖的方法」：宏藏住了多少，还剩哪些陷阱？
 
 宏藏住了：
 
@@ -162,7 +210,7 @@ panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**�
   需要每个非叶子类有自己的 trait + 运行期把 vtable 换掉，没做。
 - 类上不能写 `Drop`：`#[derive(Trace)]` 自己生成了 `Drop`。要观察释放只能塞一个 probe 字段，或用 `Finalize`。
 
-### 4. 报错可读性：宏生成的代码出错时指向哪里，能用吗？
+#### 4. 报错可读性：宏生成的代码出错时指向哪里，能用吗？
 
 我在 `zoo.rs` 里故意制造了这些错误，记下 rustc 指向哪里：
 
@@ -185,19 +233,19 @@ panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**�
 想把结构性错误挪回用户代码上，得换成 proc macro（`syn` 解析、`quote_spanned!`、自己 emit
 `compile_error!`）。这一棒没做。
 
-### 其他实际踩到的
+#### 其他实际踩到的
 
-- **gc 0.5.1 + nightly 已经在腐烂。** 它的 `nightly` feature 在 2026-08-27 之后的 nightly 上编译不过（见上文工具链）。
-  我们只能钉在旧 nightly 上，想升 nightly 就得 fork / patch gc。
+- **gc 0.5.1 + nightly 已经在腐烂。** 它的 `nightly` feature 在 2026-08-27 之后的 nightly 上编译不过。
+  当时只能钉在旧 nightly 上。（已解决：vendor + 补丁，见上文工具链。）
 - `gc_derive 0.5.0` 的 `#[derive(Trace)]` 在新编译器上每用一次都报 `non_local_definitions` 警告，
-  只能在 crate 级 `allow`。
+  只能在 crate 级 `allow`。（已解决：vendor 的 gc_derive 升到了 synstructure 0.13。）
 - 宏写 `Gc<dyn Trait>` 的默认方法时 `Self: ?Sized` 处处碍事（不能 unsize、不能 `&Self as &dyn Trait`），
   只能给每个类生成小的转换方法（`animal()`、`as_animal()`）放进 vtable。
 
-## 下一棒建议
+## 第一棒留下的建议
 
-1. 先决定 gc 依赖怎么办：fork 修掉 `GcBox::from_box` 里的指针转换，或者向上游提；否则会一直卡在 `nightly-2026-08-20`。
+1. ~~先决定 gc 依赖怎么办~~：已 vendor 并修好，见 `vendor/README.md`、`UPSTREAM.md`。
 2. 换 proc macro：结构性报错指向用户代码、语法更自然（比如对 `impl` 块加属性），并且能做三层及以上继承（非叶子类生成自己的 trait 和 `xxx_super` 模块）。
 3. 字段访问由宏生成 getter / setter，不把 `GcCell` guard 交给用户，从根上避免问题 1 那种跨虚调用的借用冲突。
 4. 设计两段式构造（`Gc::new` 之后再调虚的 `init`），把构造期的语义定下来写进文档。
-5. 支持 cast 到非叶子类（`Gc<dyn Dog>`）。
+5. ~~支持 cast 到非叶子类（`Gc<dyn Dog>`）~~：`Ref::cast::<dyn Dog>()`，见上文运行时。

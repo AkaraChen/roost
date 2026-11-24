@@ -1,0 +1,29 @@
+# Vendored from crates.io gc 0.5.1 (upstream commit 292287d0), patched by roost.
+# This manifest is upstream's own Cargo.toml (the `Cargo.toml.orig` in the .crate),
+# with `publish = false` added and the dev-dependency on serde_json kept.
+# See ../README.md and ../../UPSTREAM.md.
+[package]
+name = "gc"
+version = "0.5.1"
+authors = ["Manish Goregaokar <manishsmail@gmail.com>", "Nika Layzell <nika@thelayzells.com>"]
+description = "Tracing garbage collector plugin for Rust."
+repository = "https://github.com/Manishearth/rust-gc"
+readme = "README.md"
+license = "MPL-2.0"
+keywords = ["garbage", "plugin", "memory"]
+edition = "2018"
+publish = false
+
+[features]
+nightly = []
+derive = ["gc_derive"]
+unstable-config = []
+unstable-stats = []
+
+[dependencies]
+gc_derive = { path = "../gc_derive", version = "0.5.0", optional = true }
+serde = { version = "1.0.0", optional = true }
+
+[dev-dependencies]
+gc = { path = ".", features = ["derive"] }
+serde_json = { version = "1.0.66" }

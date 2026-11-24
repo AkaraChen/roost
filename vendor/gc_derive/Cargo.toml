@@ -1,0 +1,26 @@
+# Vendored from crates.io gc_derive 0.5.0 (upstream commit a70603225), patched by roost.
+# Upstream's own Cargo.toml (the `Cargo.toml.orig` in the .crate) with:
+#   * syn 1 / synstructure 0.12 -> synstructure 0.13 (syn 2), as on upstream master
+#     (rust-gc PR #175): fixes the `non_local_definitions` warning on every derive.
+#   * `publish = false`.
+[package]
+name = "gc_derive"
+version = "0.5.0"
+authors = ["Manish Goregaokar <manishsmail@gmail.com>", "Nika Layzell <nika@thelayzells.com>"]
+
+description = "Garbage collector derive plugin for rust-gc"
+repository = "https://github.com/Manishearth/rust-gc"
+readme = "README.md"
+license = "MPL-2.0"
+keywords = ["garbage", "macro", "memory"]
+edition = "2018"
+publish = false
+
+[lib]
+name = "gc_derive"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+synstructure = "0.13"

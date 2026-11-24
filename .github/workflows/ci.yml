@@ -27,20 +27,33 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --workspace
 
-      - name: cargo run (demo)
-        run: cargo run
+      - name: cargo run --example spike
+        run: cargo run -p roost --example spike
 
-      # The cycle tests must depend on the collector. With every collection turned into a
-      # no-op they have to fail; if they pass, the assertions don't bite.
+      # The spike's cycle tests must depend on the collector. With every collection turned
+      # into a no-op they have to fail; if they pass, the assertions don't bite.
       - name: cycle tests fail without GC
         run: |
-          if ROOST_SKIP_COLLECT=1 cargo test --test spike five_; then
+          if ROOST_SKIP_COLLECT=1 cargo test -p roost --test spike five_; then
             echo "cycle tests passed without running the collector: assertions are toothless"
             exit 1
           fi
           echo "OK: cycle tests fail when collection is skipped"
+
+      # vendor/ is outside the workspace (so our clippy -D warnings doesn't lint upstream
+      # code), so its own test suite runs separately, with and without the nightly feature.
+      - name: vendored gc test suite
+        run: |
+          cargo test --manifest-path vendor/gc/Cargo.toml --features nightly,derive
+          cargo test --manifest-path vendor/gc/Cargo.toml --features derive
+
+      # `Ref::cast` rebuilds GC pointers from raw parts; Miri checks it under Stacked Borrows.
+      - name: Miri (roost runtime unit tests)
+        run: |
+          rustup component add miri rust-src
+          cargo miri test -p roost --lib

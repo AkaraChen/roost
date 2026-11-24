@@ -1,4 +1,6 @@
 [toolchain]
-channel = "nightly-2026-08-20"
+# Bump freely: the vendored gc (vendor/gc) no longer pins us to an old nightly.
+# Last verified: fmt --check, clippy -D warnings and test all green on this one.
+channel = "nightly-2026-11-23"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
