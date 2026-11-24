@@ -4,13 +4,52 @@ An experiment: a Java-like object model for Rust — classes, field inheritance,
 methods dispatched through a vtable, and instanceof-style downcasting — on top of a tracing
 garbage collector, all behind macros.
 
-Status: **foundations**. The runtime primitives exist and are tested; the class DSL
-(`roost::class!`) is still a placeholder. The first spike lives on as a regression suite.
+Status: **class DSL MVP**. `roost::class!` declares classes with fields, single
+inheritance of any depth, constructors, virtual methods, `super`, and `this.field`; the
+runtime underneath is tested on its own. Interfaces, abstract/final, static fields and
+`toString`/`equals` overrides come next. The first spike lives on as a regression suite.
 
 ```sh
-cargo test                              # runtime unit tests + spike + doctests
+cargo test                              # runtime unit tests + class! tests + spike + doctests
+cargo run -p roost --example zoo        # the class DSL in one screen
 cargo run -p roost --example spike      # walks through the spike's five demos
-cargo miri test -p roost --lib          # the runtime's unsafe code under Miri
+cargo miri test -p roost --lib          # the runtime's unsafe code under Miri (CI also runs --test class)
+```
+
+```rust
+use roost::prelude::*;
+
+class! {
+    public class Animal {
+        protected name: String;
+        private legs: i32 = 4;
+
+        public Animal(name: String) {
+            this.name = name;
+            this.init();              // 虚调用，落到子类
+        }
+
+        public fn speak() -> String { format!("{} makes a sound", this.name) }
+        protected fn init() {}
+    }
+
+    public class Dog extends Animal {
+        private tricks: i32;
+
+        public Dog(name: String) { super(name); }
+
+        @Override
+        public fn speak() -> String { super.speak() + ", woof" }
+
+        @Override
+        protected fn init() { this.tricks = 1; }
+    }
+}
+
+let a: Ref<Animal> = Dog::new("Rex".into());   // 隐式向上转型（不需要 .into()）
+a.speak();
+a.instanceof::<Dog>();
+let d: Option<Ref<Dog>> = a.cast::<Dog>();
 ```
 
 ## 工具链
@@ -34,7 +73,9 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
 | 路径 | 内容 |
 | --- | --- |
 | `roost/` | 运行时，见下 |
-| `roost-macros/` | proc-macro。`class!` 目前只是占位：任何调用都是一个指向调用处的 `compile_error!` |
+| `roost-macros/` | proc-macro `class!`：`model.rs`（语法树 + 解析）、`index.rs`（继承链、名字解析、`@Override` 等检查）、`rewrite.rs`（改写 `this.field` / `super`）、`expand.rs`（生成代码）。诊断信息有单元测试 |
+| `roost/tests/class.rs` | `class!` 的端到端测试（三层继承 + 一个兄弟类） |
+| `roost/examples/zoo.rs` | `class!` 的演示 |
 | `roost/tests/spike.rs` | 第一棒 spike 的测试（五件事 + GcCell 冲突的证据），原样保留 |
 | `roost/tests/spike/` | spike 的对象模型：`object.rs`（`base_class!` / `derived_class!`）、`zoo.rs`、`probe.rs` |
 | `roost/examples/spike.rs` | spike 的演示，和测试共用 `tests/spike/` 下的模块 |
@@ -62,12 +103,94 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
   把 `counter.probe()` 放进对象的字段，`counter.finalized()` / `counter.dropped()` 就是这些对象被 finalize /
   被释放的次数。不是线程本地全局量，每个测试自己 new 一个。
 
-已知的、留给后面的：
+另外两样只给生成代码用：`Ref::upcast`（表达式里的显式向上转型），`roost::__private::{get, set}`（字段读写，
+各自只在函数内部短借用）。`roost::prelude` 导出 `Ref`、`Object`、`class!`。
 
-- `#[derive(Trace)]` 展开成 `::gc::Trace`，所以用它的 crate 必须直接依赖 `gc`（名字就叫 `gc`）。宏生成代码
-  时应该改成经由 `roost` 的路径（比如 `::roost::__private::gc`），这得改 gc_derive 或者由 `class!` 自己生成
-  `Trace` impl。
-- `Object::__roost_casts` 要列出所有祖先类的 trait，手写容易漏（漏了只是 cast 失败，不会 UB）。宏来生成。
+`#[derive(Trace)]` 展开成 `::gc::Trace`、用户 crate 必须直接依赖 `gc` 的问题，对 `class!` 不存在：它自己生成
+`Trace` impl，路径都经由 `::roost`。`Object::__roost_casts` 也由宏生成，祖先列表不会漏。
+
+## `class!` DSL
+
+### 语法
+
+```text
+class   := attr* ("public")? "class" Name ("extends" Parent)? "{" member* "}"
+member  := attr* ("@Override")? access ( field | ctor | method )
+field   := name ":" Type ("=" expr)? ";"
+ctor    := Name "(" params ")" { ("super(" args ");")? stmts }     // Name 就是类名
+method  := ("static")? "fn" name "(" params ")" ("->" Type)? block
+access  := "public" | "protected" | "private" | 空（包级）
+```
+
+方法体里用 `this`，不写 `self` 参数。`static fn` 是没有 `this` 的关联函数，调用写 `Animal::kingdom()`。
+
+### 生成了什么
+
+以 `class Dog extends Animal` 为例：
+
+| 生成物 | 作用 |
+| --- | --- |
+| `type Dog = dyn DogClass;` | 用户写的 `Ref<Dog>` 就是多态引用，不出现 `dyn`。edition 2024 禁止裸 trait object，用别名绕开 |
+| `trait DogClass: AnimalClass` | vtable：Dog **新引入**的虚方法 + Dog 每个字段一个隐藏访问器 `__roost_field_Dog_tricks(&self) -> &GcCell<i32>`。根类的 trait 以 `roost::Object` 为父 trait |
+| `struct __RoostDog` | 运行期类**恰好是** Dog 的对象。继承链上所有类的字段**平铺**在里面（根类在前，每个字段一个 `GcCell`，名字带类名，所以父子类字段同名也不冲突）。`Trace` / `Finalize` / `Object` 都是生成的，不依赖 `#[derive(Trace)]`（所以用户 crate 不用直接依赖 `gc`） |
+| `impl AnimalClass for __RoostDog`、`impl DogClass for __RoostDog` | 链上每个类一个 impl。每个虚方法转发到**编译期解析好**的最近实现，所以三层、N 层都一样 |
+| `impl dyn DogClass { fn new(..), .. }` | `Dog::new(..)` 构造器；方法体都在这里，形如 `fn __roost_method_speak<T: ?Sized + DogClass>(this: &T)` |
+
+关键在最后一条：**方法体和构造器体都对 `this` 的具体类 `T` 泛型**，按具体类单态化。所以 Animal 的构造器在构造
+Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地落到 Dog 的覆盖版本，这就是 Java 语义
+（spike 是 C++ 语义）。`super.speak()` 是对父类实现的直接调用 `<dyn AnimalClass>::__roost_method_speak(this)`。
+`Ref<Animal>` 上的 `a.speak()` 才走 vtable。
+
+为什么能在编译期解析：一个 `class!` 块里的所有类宏都看得到，每个类的继承链、每个方法由谁实现、每个
+`this.x` 是哪个类的字段，展开时就定下来了。代价见下面「限制」第一条。
+
+### 语义
+
+- **构造顺序（Java）**：`Dog::new(..)` 先分配完整对象，所有字段取默认值（`= expr`，否则 `Default::default()`，
+  根类的字段先求值），然后从根类到子类依次执行构造器体。`super(..)` 只能是构造器第一条语句；不写就隐式
+  `super()`，父类没有无参构造器时报错。构造器里的虚调用落到子类，子类字段此时是默认值（和 Java 一样）。
+  测试：`virtual_call_in_a_constructor_lands_in_the_subclass`。
+- **字段访问**：`this.f` 读 → `get(cell)`，在一次短借用里 **clone** 出来；`this.f = e` → `set(cell, e)`；
+  `this.f op= e` → 读出、算右边、写回（Java 的求值顺序：右边的副作用对这个字段的写会被覆盖，有测试）。
+  guard 从不离开这两个辅助函数，所以「基类拿着 borrow_mut 调虚方法，子类覆盖去读同一字段」的 panic
+  **在结构上不可能发生**（`base_method_calling_an_override_that_touches_the_same_field_does_not_panic`）。
+  格式化宏（`format!(.., this.name)`）里的字段读也会改写。
+- **方法默认是虚方法**（public / protected / 包级），`private` 方法不是虚方法（不进 vtable，子类同名方法是新方法），
+  `static` 方法也不是。
+- `@Override`：标了但父类链上没有这个虚方法 → 编译错误；覆盖了父类方法却没标 → **编译错误**（Java 只是
+  可选注解，这里更严：proc macro 在 stable API 上发不了 warning）。参数 / 返回类型和父类不一致时 rustc 报
+  E0053，同时指向覆盖处和父类声明处。
+- `instanceof` / `cast` 到任意祖先（包括非叶子类）都由宏生成 `__roost_casts`，失败返回 `None`。`Ref::ptr_eq`
+  是引用相等。
+- `Ref<X>`、`Option<Ref<X>>`（以及任何 `Trace` 类型）的字段都会被追踪，对象环能被回收
+  （`cycle_across_three_levels_is_collected`，CI 里同样验证了「跳过 collect 时这个测试会失败」）。
+
+### 和 Java 的差异
+
+| 方面 | Java | roost |
+| --- | --- | --- |
+| 向上转型 | 隐式 | `let a: Ref<Animal> = dog;` 隐式；表达式中间用 `dog.upcast::<Animal>()`。**`.into()` 做不到**：`impl From<Ref<T>> for Ref<U> where T: Unsize<U>` 和 core 的 `impl<T> From<T> for T` 冲突（E0119），所以示例里的 `.into()` 去掉了 |
+| 读字段 | 读到值 / 引用 | 读到一份 **clone**。对 `i32`、`String`、`Ref<X>` 这和 Java 一样；对 `Vec` 这类值类型，`this.items.push(x)` 改的是副本——所以宏把方法调用的接收者做成 `&副本`，`&mut self` 方法**编译不过**（E0596），而不是静默丢失修改。要改就读出来、改、写回。`this.p.x = 1`、`this.v[0] += 1`、`&mut this.f` 也直接报错。字段类型必须 `Clone`（读的时候）和 `Trace` |
+| 字段默认值 | `null` / 0 / false | `Default::default()`。没有 null：可空引用写 `Option<Ref<X>>`；`Ref<X>` 本身不能做没有初始化器的字段 |
+| 字段初始化器 | 在各自构造器里、`super()` 之后执行，可以用 `this` | 分配时一次性求值（根类在前），不能用 `this` |
+| 访问别的对象的字段 | `other.name` | 只支持 `this.f`。字段不能从类外访问（`public` 字段也不行），请写 getter |
+| `public` / `protected` / 包级 / `private` | | 类、构造器、static 方法：`pub` / `pub(crate)` / `pub(crate)` / 私有（模块内）。**虚方法都在 trait 里，Rust 的 trait 方法没有单独的可见性**，所以 protected / 包级虚方法实际和类一样可见。`private` 字段：子类里的 `this.x` 在宏展开时报错；`private` 方法生成为模块私有函数 |
+| 重载 | 支持 | 不支持（每个类最多一个构造器，方法不能同名） |
+| 字段隐藏 | 子类同名字段隐藏父类的 | 一样（存储按类名区分） |
+| `this` 作为值 | 可以存起来、传出去 | 方法体里 `this` 是 `&T`，不能存成 `Ref`。环只能从外部建（`a.befriend(b)`） |
+| 泛型方法 / 泛型类 | 支持 | 不支持（泛型方法不能进 vtable） |
+| 静态方法调用 | 可以省略类名 | 要写 `Animal::f()`（在本类方法体里也可以写 `Self::f()`） |
+| `Object` 的方法 | `toString` 等可覆盖 | `class_name()` 返回类名，`to_string()` 是 `类名@hash`；覆盖它们是下一个子任务，现在用这些名字会报错 |
+
+### 限制
+
+- **一个继承树必须写在同一个 `class!` 块里**。`extends` 不在当前块里的类会报错（错误信息说明了这一点）。
+  跨块 / 跨模块 / 跨 crate 继承需要把父类的元信息传给子类的展开（比如父类展开时顺带生成一个
+  `macro_rules!` 携带自己的声明），留给后面。
+- 用户 crate 要用 nightly 工具链，但**不需要**写任何 `#![feature]`：unsize 相关的 impl 都在 roost 里。
+- `rustfmt` 不格式化 `class! { }` 里面。
+- 诊断：方法体里的错误、覆盖签名不一致（E0053）、字段类型不是 `Trace`、拼错方法名，都指向用户代码；
+  宏自己的检查（`@Override`、private、`super(..)` 位置、未知父类……）也指向用户写的 token。
 
 ## 第一棒 spike（PR #1）
 
@@ -245,7 +368,7 @@ panic 的位置报告：gc 的 `borrow` 带 `#[track_caller]`，panic 指向**�
 ## 第一棒留下的建议
 
 1. ~~先决定 gc 依赖怎么办~~：已 vendor 并修好，见 `vendor/README.md`、`UPSTREAM.md`。
-2. 换 proc macro：结构性报错指向用户代码、语法更自然（比如对 `impl` 块加属性），并且能做三层及以上继承（非叶子类生成自己的 trait 和 `xxx_super` 模块）。
-3. 字段访问由宏生成 getter / setter，不把 `GcCell` guard 交给用户，从根上避免问题 1 那种跨虚调用的借用冲突。
-4. 设计两段式构造（`Gc::new` 之后再调虚的 `init`），把构造期的语义定下来写进文档。
+2. ~~换 proc macro~~：`class!`，任意层继承，见上文 DSL。
+3. ~~字段访问由宏生成 getter / setter~~：`this.field` 改写成短借用的 `get` / `set`。
+4. ~~两段式构造~~：比两段式更进一步，构造器体对具体类泛型，构造期虚调用就是 Java 语义。
 5. ~~支持 cast 到非叶子类（`Gc<dyn Dog>`）~~：`Ref::cast::<dyn Dog>()`，见上文运行时。
