@@ -95,6 +95,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "roost-main-tests"
+version = "0.0.0"
+dependencies = [
+ "roost",
+ "trybuild",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"

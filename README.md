@@ -7,12 +7,14 @@ garbage collector, all behind macros.
 Status: **class DSL**. `roost::class!` declares classes with fields, single
 inheritance of any depth, constructors, virtual methods, `super`, and `this.field`; interfaces
 (with `extends` and `default` methods), `abstract` / `final` classes and methods, `static`
-fields (thread-local) and methods, and `toString` / `equals` / `hashCode` overrides. The
+fields (thread-local) and methods, and `toString` / `equals` / `hashCode` overrides.
+`#[roost::main]` is the program entry point and `new!(Dog("Rex"))` the constructor call; the
 runtime underneath is tested on its own. The first spike lives on as a regression suite.
 
 ```sh
 cargo test                              # runtime unit tests + class! tests + trybuild + spike + doctests
-cargo run -p roost --example zoo        # classes, extends, super, cast
+                                        # + #[roost::main] fixtures (subprocesses)
+cargo run -p roost --example zoo        # classes, extends, super, cast (with #[roost::main], new!)
 cargo run -p roost --example shapes     # interface + abstract + static + Object methods
 cargo run -p roost --example spike      # walks through the spike's five demos
 cargo miri test -p roost --lib          # the runtime's unsafe code under Miri (CI also runs --test class / oop)
@@ -49,11 +51,15 @@ class! {
     }
 }
 
-let a: Ref<Animal> = Dog::new("Rex".into());   // 隐式向上转型（不需要 .into()）
-a.speak();
-a.instanceof::<Dog>();
-let d: Option<Ref<Dog>> = a.cast::<Dog>();
+#[roost::main]
+fn main() {
+    let a: Ref<Animal> = new!(Dog("Rex"));   // 就是 Dog::new("Rex")；隐式向上转型
+    a.speak();
+    a.instanceof::<Dog>();
+    let d: Option<Ref<Dog>> = a.cast::<Dog>();
+}
 ```
+
 
 ## 工具链
 
@@ -80,8 +86,11 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
 | `roost/tests/class.rs` | `class!` 的端到端测试（三层继承 + 一个兄弟类） |
 | `roost/tests/oop.rs` | interface / abstract / final / static / Object 方法的端到端测试 |
 | `roost/tests/compile_fail.rs`，`roost/tests/compile_fail/` | trybuild：每个编译期报错一个 `.rs` + `.stderr` 快照 |
-| `roost/examples/zoo.rs` | `class!` 的演示 |
+| `roost/examples/zoo.rs` | `class!` 的演示（用 `#[roost::main]` 和 `new!`） |
 | `roost/examples/shapes.rs` | interface + abstract + static + `toString` / `equals` 的演示 |
+| `roost/src/runtime.rs` | `#[roost::main]` 背后的运行时外壳：线程 / 栈、GC 配置与统计、异常（panic hook）、`Err` 的报告 |
+| `roost-macros/src/main_attr.rs` | `#[roost::main]` 属性宏 |
+| `roost-main-tests/` | `#[roost::main]` 的测试：`src/bin/` 下每个文件是一个小程序，`tests/main.rs` 以子进程运行它们，检查退出码、stdout、stderr；`tests/ui/` 是 trybuild 的 compile-fail 用例 |
 | `roost/tests/spike.rs` | 第一棒 spike 的测试（五件事 + GcCell 冲突的证据），原样保留 |
 | `roost/tests/spike/` | spike 的对象模型：`object.rs`（`base_class!` / `derived_class!`）、`zoo.rs`、`probe.rs` |
 | `roost/examples/spike.rs` | spike 的演示，和测试共用 `tests/spike/` 下的模块 |
@@ -111,9 +120,14 @@ cargo workspace，`vendor/` 不是 member（不让我们的 `clippy -D warnings`
   把 `counter.probe()` 放进对象的字段，`counter.finalized()` / `counter.dropped()` 就是这些对象被 finalize /
   被释放的次数。不是线程本地全局量，每个测试自己 new 一个。
 
-另外两样只给生成代码用：`Ref::upcast`（表达式里的显式向上转型），`roost::__private::{get, set, get_static,
-set_static}`（字段 / 静态字段读写，各自只在函数内部短借用）。`roost::prelude` 导出 `Ref`、`Object`、
-`ObjectClass`、`class!`。
+- **`roost::runtime`**：`#[roost::main]` 的外壳（`run(Config, main)`，也能手动用），`stats()`（`Ref::new` 分配的
+  对象数、GC 堆当前字节数、已做的回收次数），以及 roost 异常：`throw(Exception { kind, message })` panic 出
+  `roost.Kind: message`，装了 hook 时打印成 Java 的样子（见「程序入口」）。
+
+另外两样只给生成代码用：`Ref::upcast`（表达式里的显式向上转型），`roost::__private::{field, get, set,
+get_static, set_static}`（字段 / 静态字段读写，各自只在函数内部短借用；`field(cell, "Animal", "name")` 和
+`get_static(&KEY, "Animal", "count")` 带上声明它的类名和字段名，冲突时报出 `Animal.name` / `Animal.count`）。
+`roost::prelude` 导出 `Ref`、`Object`、`ObjectClass`、`class!`、`new!`。
 
 `#[derive(Trace)]` 展开成 `::gc::Trace`、用户 crate 必须直接依赖 `gc` 的问题，对 `class!` 不存在：它自己生成
 `Trace` impl，路径都经由 `::roost`。`ObjectClass::__roost_casts` 也由宏生成，祖先和接口列表不会漏。
@@ -164,7 +178,7 @@ class! {
     }
 }
 
-let p: Ref<Pet> = Dog::new("Rex".into());
+let p: Ref<Pet> = Dog::new("Rex");
 p.greet();                         // "Rex greets Ann"
 p.instanceof::<Named>();           // true
 let a: Ref<Animal> = p.cast::<Animal>().unwrap();
@@ -201,10 +215,13 @@ Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地�
   根类的字段先求值），然后从根类到子类依次执行构造器体。`super(..)` 只能是构造器第一条语句；不写就隐式
   `super()`，父类没有无参构造器时报错。构造器里的虚调用落到子类，子类字段此时是默认值（和 Java 一样）。
   测试：`virtual_call_in_a_constructor_lands_in_the_subclass`。
-- **字段访问**：`this.f` 读 → `get(cell)`，在一次短借用里 **clone** 出来；`this.f = e` → `set(cell, e)`；
+- **字段访问**：`this.f` 读 → `get(field(cell, "Owner", "f"))`，在一次短借用里 **clone** 出来；`this.f = e` → `set(..)`；
   `this.f op= e` → 读出、算右边、写回（Java 的求值顺序：右边的副作用对这个字段的写会被覆盖，有测试）。
   guard 从不离开这两个辅助函数，所以「基类拿着 borrow_mut 调虚方法，子类覆盖去读同一字段」的 panic
   **在结构上不可能发生**（`base_method_calling_an_override_that_touches_the_same_field_does_not_panic`）。
+  剩下唯一能冲突的情形是用户代码在一次字段访问**之中**运行：字段类型自定义的 `Clone` 回调到对象、写同一个字段
+  （`roost-main-tests/src/bin/borrow_conflict.rs`）。这时抛 `roost.BorrowConflict: field Animal.name ...`，
+  类名是**声明**这个字段的类。
   格式化宏（`format!(.., this.name)`）里的字段读也会改写。
 - **方法默认是虚方法**（public / protected / 包级），`private` 方法不是虚方法（不进 vtable，子类同名方法是新方法），
   `static` 方法也不是。
@@ -280,6 +297,59 @@ Dog 时是以 `T = __RoostDog` 实例化的，里面的 `this.init()` 静态地�
   `unreachable!()`，避免 rustc 在占位表达式上堆出无关的后续错误；所以同一个方法体里的其他错误要等这个修了才会出现。
 - `new` 抽象类的报错还带着生成代码的痕迹（`the trait __RoostAbstractShape is not implemented for &()`
   这类 help 行），主消息和位置是对的。
+
+## 程序入口：`#[roost::main]`
+
+```rust
+use roost::prelude::*;
+
+#[roost::main(stack = "256MB", gc_threshold = "1MB", gc_stats)]
+fn main() -> Result<(), std::num::ParseIntError> {
+    let zoo = vec![new!(Dog("Rex")) as Ref<Animal>, new!(Cat())];
+    let n: i32 = "12x".parse()?;
+    Ok(())
+}
+```
+
+属性宏，**只加外壳，不改函数体**（函数体先被 rustc 当 Rust 解析，属性宏也改变不了这一点）。它把 `main` 的函数体
+原样搬进一个内部函数，然后：
+
+| 行为 | 说明 |
+| --- | --- |
+| 大栈线程 | 在一个**名叫 `main`** 的新线程里运行，栈默认 64 MB，`stack = "256MB"` 可改。gc 的标记阶段沿引用递归，很深的对象图（长链表）需要栈。单位 `B` / `KB` / `MB` / `GB`（按 1024，大小写都行，也接受 `KiB` 这种写法），或整数字节数 |
+| GC 配置 | `gc_threshold = "1MB"`：GC 堆分配到这么多字节才第一次自动回收（不写就用 gc 自己的默认值；之后阈值随堆增长） |
+| 退出前回收 | `main` 返回后，**在同一个线程上**（GC 是线程本地的）做一次 `collect()`，`main` 留下的不可达对象（包括环）在这里被 finalize、释放 |
+| `gc_stats` | 退出时往 stderr 打一行：`[roost gc] objects allocated: 3, collections: 2 (1 at exit), heap at exit: 248 bytes, freed by the final collection: 248 bytes, left: 0 bytes` |
+| roost 异常 | 装一个 panic hook：roost 自己抛的异常（目前是字段访问的 `BorrowConflict`）打印成 Java 的样子，退出码 1：<br>`Exception in thread "main" roost.BorrowConflict: field Animal.name cannot be written while it is being read (...)`<br>`	at src/main.rs:39:30`<br>位置是用户代码里那次字段访问（`#[track_caller]`）。设了 `RUST_BACKTRACE=1` 会附上完整栈 |
+| 其他 panic | 原样交给之前的 hook（`thread 'main' panicked at ...`），退出码 101，和普通 Rust `main` 一样 |
+| `Err` | `fn main() -> Result<(), E>` 返回 `Err(e)` 时打印 `Exception in thread "main" 类型名: 消息`，退出码 1。`E: Error` 时消息用 `Display`，并按 `source()` 链逐行打 `Caused by: ...`；`Box<dyn Error>` / `anyhow::Error` 这类指向 `Error` 的类型同样；只有 `Display` 时用 `Display`；只有 `Debug` 时用 `Debug`。类型名去掉模块路径（`ParseIntError`、`Box<dyn Error>`） |
+
+误用都是编译错误，指向用户写的 token：放在别的函数上（`fn start`）、参数名写错（`stak`）、大小写错
+（`"64 parsecs"`）、返回类型不是 `()` / `Result<(), E>`（`-> i32`）、`async` / 带参数 / 泛型的 `main`。
+（`roost-main-tests/tests/ui/`。）
+
+没有用 `#[roost::main]` 时，roost 异常就是普通 panic，消息里同样有 `roost.BorrowConflict: field Animal.name ...`。
+外壳本身是 `roost::runtime::run(Config, || -> i32)`，也可以手动调用。
+
+## 构造：`new!` 和构造器参数
+
+- `new!(Dog("Rex"))` 就是 `Dog::new("Rex")`（`macro_rules!`，类名可以带路径，`new!(zoo::Dog("Rex"))`）。
+  **不支持** `new Dog("Rex")` 这种裸语法（不解析 Java 表达式）。
+- 向上转型：`new!(Dog("Rex")) as Ref<Animal>`。`as` 本身就会做这个 unsize 转换，不需要宏做什么。
+- **构造器里 `String` 类型的参数生成为 `impl Into<String>`**，所以 `Dog::new("Rex")`、`Dog::new(name)`、
+  `Dog::new(&name)`、`Dog::new(format!(..))` 都行；构造器里的 `super("Rex")` 也一样。按字面判断：
+  `String`、`std::string::String`、`alloc::string::String`（别名、遮蔽的 `String` 看不出来）。
+  方法参数**不变**：虚方法在 trait（vtable）里，`impl Trait` 参数会让 trait 不再 dyn-compatible。
+- **为什么只对 `String`，不推广到所有非 `Ref` 参数**：试过 `impl Into<T>`，下面这些今天能编译的实参会变成
+  E0282 / E0283（type annotations needed）或 E0277（没有对应的 `From`），因为它们的类型靠**期望类型**推断，而 `impl Into<T>` 把期望
+  类型拿掉了：
+  - `x.into()`、`Default::default()`、`s.parse().unwrap()`、`iter.collect()`、`n as _`；
+  - unsize 转换：`Option<Ref<Dog>>` 参数传 `Some(puppy)`、`Box<dyn Fn()>` 参数传 `Box::new(|| ..)`、`&[T]` 参数传 `&[1, 2]`；
+    这正是 `Ref` 参数要排除的原因，但同样的问题出现在任何含 trait object / slice 的类型里。
+
+  （整数、浮点字面量、`None`、`vec![]` 实测没问题。）收益又很小：除了 `&str → String`，别的 `Into` 很少用来传构造参数。
+  所以规则就是**只有 `String`**。代价：原来写 `Dog::new("Rex".into())` 的代码现在要去掉 `.into()`
+  （`"Rex".into()` 要推断成什么不再确定，E0283）。
 
 ## 第一棒 spike（PR #1）
 

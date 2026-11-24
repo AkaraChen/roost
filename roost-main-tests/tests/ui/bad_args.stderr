@@ -1,0 +1,5 @@
+error: unknown argument `stak`: expected `stack = "64MB"`, `gc_threshold = "1MB"` or `gc_stats`
+ --> tests/ui/bad_args.rs:1:15
+  |
+1 | #[roost::main(stak = "64MB")]
+  |               ^^^^

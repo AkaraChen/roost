@@ -152,10 +152,7 @@ class! {
 
 #[test]
 fn interface_references_are_polymorphic() {
-    let pets: Vec<Ref<Pet>> = vec![
-        Dog::new("Rex".into(), "Ann".into()),
-        Puppy::new("Bit".into(), "Bob".into()),
-    ];
+    let pets: Vec<Ref<Pet>> = vec![Dog::new("Rex", "Ann"), Puppy::new("Bit", "Bob")];
     let greetings: Vec<String> = pets.iter().map(|p| p.greet()).collect();
     assert_eq!(greetings, ["Rex greets Ann", "Bit greets Bob!"]);
     // Methods of the super-interface, and a default method nobody overrides.
@@ -172,21 +169,21 @@ fn interface_references_are_polymorphic() {
 
 #[test]
 fn a_class_reference_reaches_interface_methods() {
-    let d: Ref<Dog> = Dog::new("Rex".into(), "Ann".into());
+    let d: Ref<Dog> = Dog::new("Rex", "Ann");
     // `name` comes from Named (implemented in Animal), `greet` from Pet, `describe` from
     // Animal: all callable on a `Ref<Dog>`.
     assert_eq!(d.name(), "Rex");
     assert_eq!(d.greet(), "Rex greets Ann");
     assert_eq!(d.describe(), "Rex (4 legs) says woof");
-    let p: Ref<Puppy> = Puppy::new("Bit".into(), "Bob".into());
+    let p: Ref<Puppy> = Puppy::new("Bit", "Bob");
     assert_eq!(p.greet(), "Bit greets Bob!");
     assert_eq!(p.kind(), "animal");
 }
 
 #[test]
 fn instanceof_and_cast_to_interfaces() {
-    let a: Ref<Animal> = Puppy::new("Bit".into(), "Bob".into());
-    let f: Ref<Animal> = Fish::new("Nemo".into());
+    let a: Ref<Animal> = Puppy::new("Bit", "Bob");
+    let f: Ref<Animal> = Fish::new("Nemo");
     assert!(a.instanceof::<Pet>());
     assert!(a.instanceof::<Named>());
     assert!(a.instanceof::<Comparable>());
@@ -209,8 +206,8 @@ fn instanceof_and_cast_to_interfaces() {
 
 #[test]
 fn interface_method_implemented_with_object_argument() {
-    let rex = Dog::new("Rex".into(), "Ann".into());
-    let ace = Dog::new("Ace".into(), "Ann".into());
+    let rex = Dog::new("Rex", "Ann");
+    let ace = Dog::new("Ace", "Ann");
     let c: Ref<Comparable> = rex.clone();
     assert_eq!(c.compare_to(ace.clone()), 1);
     assert_eq!(ace.compare_to(rex.clone()), -1);
@@ -221,9 +218,9 @@ fn interface_method_implemented_with_object_argument() {
 #[test]
 fn abstract_methods_dispatch_to_the_subclass() {
     let zoo: Vec<Ref<Animal>> = vec![
-        Dog::new("Rex".into(), "Ann".into()),
-        Puppy::new("Bit".into(), "Bob".into()),
-        Fish::new("Nemo".into()),
+        Dog::new("Rex", "Ann"),
+        Puppy::new("Bit", "Bob"),
+        Fish::new("Nemo"),
     ];
     let described: Vec<String> = zoo.iter().map(|a| a.describe()).collect();
     assert_eq!(
@@ -240,8 +237,8 @@ fn abstract_methods_dispatch_to_the_subclass() {
 #[test]
 fn static_fields_are_shared_and_thread_local() {
     Animal::reset();
-    Dog::new("Rex".into(), "Ann".into());
-    Fish::new("Nemo".into());
+    Dog::new("Rex", "Ann");
+    Fish::new("Nemo");
     // Written by Animal's constructor (as `Animal::created` and `Self::created`), read
     // through a static method and through the subclass.
     assert_eq!(Animal::created(), 2);
@@ -256,7 +253,7 @@ fn static_fields_are_shared_and_thread_local() {
     // Another thread has its own copy (and its own collector).
     let other = std::thread::spawn(|| {
         let before = Animal::created();
-        Fish::new("Dory".into());
+        Fish::new("Dory");
         (before, Animal::created())
     })
     .join()
@@ -292,7 +289,7 @@ fn equals_and_hash_code_overrides() {
     assert!(a.equals(b.clone()));
     assert!(!Ref::ptr_eq(&a, &b));
     assert!(!a.equals(c.clone()));
-    assert!(!a.equals(Dog::new("Rex".into(), "Ann".into())));
+    assert!(!a.equals(Dog::new("Rex", "Ann")));
     assert_eq!(a.hash_code(), b.hash_code());
     assert_eq!(a.hash_code(), 33);
     // Through `Ref<Object>`: still the override.
@@ -320,7 +317,7 @@ fn to_string_override_and_display() {
     assert_eq!(plain.to_string(), expected);
     assert!(plain.equals(plain.clone()));
     assert!(!plain.equals(Plain::new()));
-    let d = Dog::new("Rex".into(), "Ann".into());
+    let d = Dog::new("Rex", "Ann");
     assert_eq!(d.to_string(), format!("Dog@{:x}", d.hash_code()));
 }
 
