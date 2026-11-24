@@ -1,5 +1,7 @@
-error: class `Square` is not abstract and does not implement `Shape.area`: implement it (with @Override) or declare the class `abstract`
+error: class `Square` is not abstract and does not implement `Shape.area`
  --> tests/compile_fail/missing_abstract_method.rs:9:11
   |
 9 |     class Square extends Shape {
   |           ^^^^^^
+  |
+  = help: implement it (with @Override) or declare the class `abstract`

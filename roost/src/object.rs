@@ -18,6 +18,7 @@ pub type Object = dyn ObjectClass;
 /// also match `Ref<dyn Animal>` itself, and method lookup on a `Ref` would then stop at the
 /// reference instead of reaching the object.
 pub trait AsAny: Any {
+    /// The object as `&dyn Any` of its concrete (runtime) class.
     fn as_any(&self) -> &dyn Any;
 }
 

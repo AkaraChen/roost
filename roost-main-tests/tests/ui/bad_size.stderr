@@ -1,5 +1,7 @@
-error: invalid size "64 parsecs": write a number of bytes or a number with a unit, e.g. "64MB" (B, KB, MB, GB; powers of 1024)
+error: invalid size "64 parsecs"
  --> tests/ui/bad_size.rs:1:23
   |
 1 | #[roost::main(stack = "64 parsecs")]
   |                       ^^^^^^^^^^^^
+  |
+  = help: write a number of bytes or a number with a unit, e.g. "64MB" (B, KB, MB, GB; powers of 1024)

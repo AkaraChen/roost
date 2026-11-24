@@ -1,0 +1,7 @@
+error: `fn main` takes no parameters
+ --> tests/ui/main_with_args.rs:2:9
+  |
+2 | fn main(args: Vec<String>) {
+  |         ^^^^^^^^^^^^^^^^^
+  |
+  = help: Java's `String[] args` is `std::env::args()` in Rust: `let args: Vec<String> = std::env::args().skip(1).collect();`

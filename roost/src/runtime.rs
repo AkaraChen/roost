@@ -106,6 +106,16 @@ pub struct GcStats {
 }
 
 /// Statistics for the current thread's GC heap.
+///
+/// ```
+/// use roost::prelude::*;
+/// class! { class Node { next: Option<Ref<Node>>; } }
+///
+/// let before = roost::runtime::stats();
+/// let _n = new!(Node());
+/// let after = roost::runtime::stats();
+/// assert_eq!(after.objects_allocated, before.objects_allocated + 1);
+/// ```
 pub fn stats() -> GcStats {
     let s = ::gc::stats();
     GcStats {
@@ -152,7 +162,9 @@ impl fmt::Display for ExceptionKind {
 /// A runtime error raised by roost itself, with the class / field it is about.
 #[derive(Clone, Debug)]
 pub struct Exception {
+    /// What went wrong; printed as `roost.<Kind>`.
     pub kind: ExceptionKind,
+    /// The details, e.g. `field Animal.name cannot be read while it is being written`.
     pub message: String,
 }
 
@@ -255,15 +267,20 @@ pub trait ReportDebug {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`#[roost::main]` needs `fn main()` or `fn main() -> Result<(), E>` with `E: Debug`, not `-> {Self}`",
-    label = "not `Result<(), E>`"
+    label = "not `Result<(), E>`",
+    note = "to exit with a status code, as Java's `System.exit(code)`, call `std::process::exit(code)`"
 )]
-pub trait MainResult {}
+pub trait MainResult {
+    type Error;
+    fn into_result(self) -> Result<(), Self::Error>;
+}
 
-impl<E: fmt::Debug> MainResult for Result<(), E> {}
-
-/// Compile-time check of `main`'s return type, for a readable error.
-#[doc(hidden)]
-pub fn assert_main_result<T: MainResult>() {}
+impl<E: fmt::Debug> MainResult for Result<(), E> {
+    type Error = E;
+    fn into_result(self) -> Result<(), E> {
+        self
+    }
+}
 
 #[doc(hidden)]
 pub trait ReportBoxedError {

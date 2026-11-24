@@ -1,0 +1,7 @@
+error: `new!` calls the constructor `::new` itself
+  --> tests/compile_fail/new_macro_with_new_call.rs:11:24
+   |
+11 |     let _d = new!(Dog::new("Rex"));
+   |                        ^^^
+   |
+   = help: write `new!(Dog("Rex"))`, or call `Dog::new("Rex")` without `new!`

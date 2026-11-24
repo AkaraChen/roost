@@ -18,7 +18,4 @@ note: required by a bound in `<(dyn ShapeClass + 'static)>::new`
  3 | class! {
  4 |     abstract class Shape {
    |                    ^^^^^ required by this bound in `<dyn ShapeClass>::new`
- 5 |         public abstract fn area() -> f64;
- 6 |     }
- 7 | }
    = note: this error originates in the macro `class` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -3,3 +3,5 @@ error: cannot override final method `Animal.kind`
   |
 8 |         @Override public fn kind() -> String { "dog".into() }
   |                             ^^^^
+  |
+  = help: remove `final` from `Animal.kind`, or give this method another name

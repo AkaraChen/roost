@@ -16,6 +16,8 @@ use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{ItemFn, LitInt, LitStr, ReturnType, Type};
 
+use crate::diag::Help;
+
 #[derive(Default)]
 struct Args {
     stack: Option<usize>,
@@ -36,7 +38,7 @@ fn parse_size(input: syn::parse::ParseStream<'_>) -> syn::Result<usize> {
             .map_err(|e| syn::Error::new(e.span(), "expected a size such as \"64MB\""))?;
         (lit.value(), lit.span())
     };
-    size_in_bytes(&text).map_err(|msg| syn::Error::new(span, msg))
+    size_in_bytes(&text).map_err(|msg| crate::index::error(span, &msg))
 }
 
 fn size_in_bytes(text: &str) -> Result<usize, String> {
@@ -45,7 +47,9 @@ fn size_in_bytes(text: &str) -> Result<usize, String> {
     let (num, unit) = t.split_at(digits_end);
     let bad = || {
         format!(
-            "invalid size {text:?}: write a number of bytes or a number with a unit, e.g. \"64MB\" (B, KB, MB, GB; powers of 1024)"
+            "invalid size {text:?}{}write a number of bytes or a number with a unit, e.g. \
+             \"64MB\" (B, KB, MB, GB; powers of 1024)",
+            crate::index::HELP
         )
     };
     let n: usize = num.parse().map_err(|_| bad())?;
@@ -88,11 +92,20 @@ fn parse_args(attr: TokenStream) -> syn::Result<Args> {
             }
             args.gc_stats = true;
         } else {
-            let name = meta
-                .path
-                .get_ident()
+            let ident = meta.path.get_ident().map(ToString::to_string);
+            let name = ident
+                .as_deref()
                 .map_or_else(|| "this".to_string(), |i| format!("`{i}`"));
-            return Err(meta.error(format!("unknown argument {name}: {USAGE}")));
+            let e = meta.error(format!("unknown argument {name}"));
+            return Err(
+                match ident
+                    .as_deref()
+                    .and_then(|i| crate::diag::similar(i, ["stack", "gc_threshold", "gc_stats"]))
+                {
+                    Some(k) => e.help(format!("did you mean `{k}`?")),
+                    None => e.help(USAGE),
+                },
+            );
         }
         Ok(())
     });
@@ -111,10 +124,11 @@ fn check_signature(f: &ItemFn) -> syn::Result<()> {
     let sig = &f.sig;
     let err = |span: Span, msg: &str| Err(syn::Error::new(span, msg));
     if sig.ident != "main" {
-        return err(
+        return Err(syn::Error::new(
             sig.ident.span(),
             "`#[roost::main]` goes on the program's `fn main`, not on other functions",
-        );
+        )
+        .help("rename this function to `main`, or remove the attribute"));
     }
     if let Some(a) = &sig.asyncness {
         return err(
@@ -132,9 +146,11 @@ fn check_signature(f: &ItemFn) -> syn::Result<()> {
         return err(sig.generics.span(), "`fn main` cannot be generic");
     }
     if !sig.inputs.is_empty() {
-        return err(
-            sig.inputs.span(),
-            "`fn main` takes no parameters (use `std::env::args()`)",
+        return Err(
+            syn::Error::new(sig.inputs.span(), "`fn main` takes no parameters").help(
+                "Java's `String[] args` is `std::env::args()` in Rust: \
+             `let args: Vec<String> = std::env::args().skip(1).collect();`",
+            ),
         );
     }
     Ok(())
@@ -152,6 +168,12 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     if let Err(e) = check_signature(&func) {
+        if func.sig.ident == "main" {
+            // Only the error: the item as written would add rustc's own complaints about
+            // `main`'s signature.
+            let e = crate::diag::emit([&e]);
+            return quote!(#e fn main() {});
+        }
         return with_item(e, item);
     }
 
@@ -185,8 +207,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
         quote_spanned!(ty.span()=>
             {
-            ::roost::runtime::assert_main_result::<#ty>();
-            match __roost_main() {
+            match <#ty as ::roost::runtime::MainResult>::into_result(__roost_main()) {
                 ::core::result::Result::Ok(()) => 0,
                 ::core::result::Result::Err(__roost_error) => {
                     #[allow(unused_imports)]
@@ -219,7 +240,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The error, followed by the item unchanged (so that it still gets checked and no
 /// "`main` function not found" error piles on).
 fn with_item(e: syn::Error, item: TokenStream) -> TokenStream {
-    let e = e.to_compile_error();
+    let e = crate::diag::emit([&e]);
     quote!(#e #item)
 }
 

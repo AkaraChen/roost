@@ -1,0 +1,7 @@
+error: `pub` is Rust's modifier; inside `class!` write Java's
+ --> tests/compile_fail/rust_pub_modifier.rs:5:9
+  |
+5 |         pub fn bark() -> String { "woof".to_string() }
+  |         ^^^
+  |
+  = help: write `public`, `protected` or `private` (or nothing, for package-private)

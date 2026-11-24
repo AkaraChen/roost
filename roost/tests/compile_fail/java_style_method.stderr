@@ -1,0 +1,7 @@
+error: Java-style method declaration
+ --> tests/compile_fail/java_style_method.rs:5:16
+  |
+5 |         public void bark() { println!("woof"); }
+  |                ^^^^
+  |
+  = help: write `fn bark(..) { .. }`: a method without `->` returns nothing, like `void`

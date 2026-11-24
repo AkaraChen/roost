@@ -46,6 +46,16 @@ impl<T: ?Sized> Ref<T> {
     /// An explicit upcast: `Dog::new(..).upcast::<Animal>()`. Same as the implicit
     /// coercion (`let a: Ref<Animal> = dog;`), for places where no type is expected.
     /// (A `From` impl for this would overlap with `impl<T> From<T> for T`.)
+    ///
+    /// ```
+    /// use roost::prelude::*;
+    /// class! {
+    ///     class Animal { public fn kind() -> String { "animal".to_string() } }
+    ///     class Dog extends Animal {}
+    /// }
+    /// let animals = vec![new!(Dog()).upcast::<Animal>(), new!(Animal())];
+    /// assert_eq!(animals[0].kind(), "animal");
+    /// ```
     pub fn upcast<U: ?Sized>(self) -> Ref<U>
     where
         T: Unsize<U>,
@@ -54,6 +64,18 @@ impl<T: ?Sized> Ref<T> {
     }
 
     /// Java's `a == b` on references: do both point to the same object?
+    ///
+    /// ```
+    /// use roost::prelude::*;
+    /// class! { class Point { x: i32; Point(x: i32) { this.x = x; } } }
+    /// let a = new!(Point(1));
+    /// let b = a.clone(); // copies the reference
+    /// let c = new!(Point(1));
+    /// assert!(Ref::ptr_eq(&a, &b));
+    /// assert!(!Ref::ptr_eq(&a, &c)); // equal contents, different objects
+    /// let o: Ref<Object> = a.clone();
+    /// assert!(Ref::ptr_eq(&o, &a)); // static types may differ
+    /// ```
     ///
     /// The two sides may have different static types (`Ref<Dog>` vs `Ref<dyn Animal>`):
     /// only the object's address is compared, never the vtable. (Comparing fat pointers
@@ -66,8 +88,21 @@ impl<T: ?Sized> Ref<T> {
 }
 
 impl<T: ?Sized + ObjectClass> Ref<T> {
-    /// Java's `x instanceof U`. `U` is a concrete class (`Puppy`) or a class trait object
-    /// (`dyn Dog`); `true` for subclasses too.
+    /// Java's `x instanceof U`. `U` is a class or an interface declared with `class!`
+    /// (`Ref<Animal>` is `Ref<dyn AnimalClass>`, so `U = Animal` means "any `Animal`");
+    /// `true` for subclasses too.
+    ///
+    /// ```
+    /// use roost::prelude::*;
+    /// class! {
+    ///     interface Pet {}
+    ///     class Animal {}
+    ///     class Dog extends Animal implements Pet {}
+    /// }
+    /// let a: Ref<Animal> = new!(Dog());
+    /// assert!(a.instanceof::<Dog>() && a.instanceof::<Pet>() && a.instanceof::<Object>());
+    /// assert!(!new!(Animal()).instanceof::<Dog>());
+    /// ```
     pub fn instance_of<U: ?Sized + 'static>(&self) -> bool {
         self.lookup::<U>().is_some()
     }
@@ -79,9 +114,23 @@ impl<T: ?Sized + ObjectClass> Ref<T> {
 
     /// Java's `(U) x`, checked: the same object as a `Ref<U>`, or `None` if it isn't one.
     ///
-    /// `U` can be the concrete runtime class (`Ref<dyn Animal>` -> `Ref<Puppy>`) or the
-    /// trait of any class the object's class extends, leaf or not (`Ref<dyn Animal>` ->
-    /// `Ref<dyn Dog>`). Upcasts work too, but the implicit coercion is simpler for those.
+    /// `U` can be the object's class or any class it extends, leaf or not, or any interface
+    /// it implements. Upcasts work too, but the implicit coercion is simpler for those.
+    ///
+    /// ```
+    /// use roost::prelude::*;
+    /// class! {
+    ///     class Animal {}
+    ///     class Dog extends Animal { public fn bark() -> String { "woof".to_string() } }
+    ///     class Puppy extends Dog {}
+    /// }
+    /// let a: Ref<Animal> = new!(Puppy());
+    /// // Java: if (a instanceof Dog) { ((Dog) a).bark(); }
+    /// if let Some(d) = a.cast::<Dog>() {
+    ///     assert_eq!(d.bark(), "woof");
+    /// }
+    /// assert!(new!(Animal()).cast::<Dog>().is_none()); // no ClassCastException: None
+    /// ```
     pub fn cast<U: ?Sized + 'static>(&self) -> Option<Ref<U>> {
         let target = self.lookup::<U>()?;
         // `into_raw` keeps the root that `clone` added, `from_raw` takes it over (like

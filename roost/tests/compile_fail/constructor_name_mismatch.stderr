@@ -1,0 +1,7 @@
+error: `Dgo(..)` is neither the constructor of `Dog` nor a method
+ --> tests/compile_fail/constructor_name_mismatch.rs:6:16
+  |
+6 |         public Dgo(name: String) { this.name = name; }
+  |                ^^^
+  |
+  = help: a constructor is named exactly like its class: did you mean `Dog`?

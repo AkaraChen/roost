@@ -1,0 +1,8 @@
+error: unknown superclass `Animl`
+ --> tests/compile_fail/unknown_superclass.rs:5:30
+  |
+5 |     public class Dog extends Animl {}
+  |                              ^^^^^
+  |
+  = help: did you mean `Animal`?
+  = note: the superclass must be declared in the same `class!` block (a current limitation of roost: there are no imports between `class!` blocks)

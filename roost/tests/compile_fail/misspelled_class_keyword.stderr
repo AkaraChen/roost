@@ -1,0 +1,7 @@
+error: unknown keyword `clas`
+ --> tests/compile_fail/misspelled_class_keyword.rs:4:12
+  |
+4 |     public clas Dog {}
+  |            ^^^^
+  |
+  = help: did you mean `class`?

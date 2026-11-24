@@ -1,0 +1,7 @@
+error: a class can extend only one class
+ --> tests/compile_fail/multiple_inheritance.rs:6:36
+  |
+6 |     public class Dog extends Animal, Pet {}
+  |                                    ^
+  |
+  = help: as in Java, there is single inheritance: make `Pet` an `interface` and write `extends Animal implements ..`

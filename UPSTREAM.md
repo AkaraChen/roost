@@ -75,6 +75,18 @@ spike 当时只能在 crate 级 `#![allow(non_local_definitions)]`。
 **怎么提。** 不需要 PR，需要的是**发版**：在 rust-gc 开 issue 请维护者发布 gc / gc_derive 新版本，
 理由是 #175 修掉的警告和上面第 1 项。发版之后我们就能删掉 `vendor/`。
 
+## 3. `Trace` 上的 `#[diagnostic::on_unimplemented]`：更好懂的报错——可以提，优先级低
+
+**现象。** 把没实现 `Trace` 的类型放进 `Gc` / `GcCell` / `#[derive(Trace)]` 的结构体，报错是
+`the trait bound `X: Trace` is not satisfied`，没有说怎么办。
+
+**补丁。** `gc/src/trace.rs` 给 `Trace` 加了 `#[diagnostic::on_unimplemented]`（`message` / `label` / `note`）：
+`X does not implement Trace, so it cannot be stored in a garbage-collected object`，并提示
+`#[derive(Trace, Finalize)]` 和 `#[unsafe_ignore_trace]`。只影响报错文字，不影响任何语义；这个属性从
+Rust 1.78 起稳定，旧编译器会忽略它。
+
+**怎么提。** 可以作为一个小 PR 提给 rust-gc。note 里有一句提到 roost（`roost::gc::Trace`），提之前要删掉。
+
 ## 不提的改动
 
 - 两个 `Cargo.toml` 换成上游手写的 manifest、改成路径依赖、加 `publish = false`：只是 vendor 需要。

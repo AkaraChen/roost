@@ -1,0 +1,7 @@
+error: class `Dog` has no field `nmae`
+ --> tests/compile_fail/unknown_field.rs:6:43
+  |
+6 |         public fn name() -> String { this.nmae }
+  |                                           ^^^^
+  |
+  = help: did you mean `this.name`?

@@ -11,7 +11,20 @@ use proc_macro2::Span;
 use quote::{ToTokens, format_ident};
 use syn::Ident;
 
+use crate::diag::{Help, similar};
 use crate::model::{Access, Class, Hierarchy, Method};
+
+/// Separates a message from its help line in the `Err(String)`s of the resolve functions;
+/// see [`error`].
+pub const HELP: &str = "\u{1}";
+
+/// The error for a message from a resolve function: `msg` or `msg{HELP}help`.
+pub fn error(span: Span, msg: &str) -> syn::Error {
+    match msg.split_once(HELP) {
+        Some((m, h)) => syn::Error::new(span, m).help(h),
+        None => syn::Error::new(span, msg),
+    }
+}
 
 /// Names that can't be methods: other `roost::ObjectClass` methods, and the constructor.
 const RESERVED: &[&str] = &["class_name", "as_any", "new"];
@@ -78,16 +91,19 @@ impl Index {
                 ok = false;
             }
         }
+        let names: Vec<String> = classes.iter().map(|c| c.name.to_string()).collect();
         let find = |name: &Ident, errors: &mut Vec<syn::Error>, what: &str| {
             let found = classes.iter().position(|c| c.name == *name);
             if found.is_none() {
-                errors.push(syn::Error::new(
-                    name.span(),
-                    format!(
-                        "unknown {what} `{name}`: it must be declared in the same `class!` block \
-                         (a current limitation of roost)"
-                    ),
-                ));
+                let e = syn::Error::new(name.span(), format!("unknown {what} `{name}`"));
+                let e = match similar(&name.to_string(), names.iter().map(String::as_str)) {
+                    Some(n) => e.help(format!("did you mean `{n}`?")),
+                    None => e,
+                };
+                errors.push(e.note(format!(
+                    "the {what} must be declared in the same `class!` block (a current \
+                     limitation of roost: there are no imports between `class!` blocks)"
+                )));
             }
             found
         };
@@ -103,10 +119,13 @@ impl Index {
                     break;
                 };
                 if classes[p].is_interface() {
-                    errors.push(syn::Error::new(
-                        parent.span(),
-                        format!("`{parent}` is an interface: write `implements {parent}`"),
-                    ));
+                    errors.push(
+                        syn::Error::new(
+                            parent.span(),
+                            format!("`{parent}` is an interface, not a class"),
+                        )
+                        .help(format!("as in Java, a class `implements {parent}`")),
+                    );
                     ok = false;
                     break;
                 }
@@ -134,12 +153,22 @@ impl Index {
                     continue;
                 };
                 if !classes[j].is_interface() {
-                    let msg = if class.is_interface() {
-                        format!("`{name}` is a class: an interface can only extend interfaces")
+                    let e = if class.is_interface() {
+                        syn::Error::new(
+                            name.span(),
+                            format!("`{name}` is a class: an interface can only extend interfaces"),
+                        )
+                        .help(format!(
+                            "turn `{name}` into an `interface`, or remove it from this list"
+                        ))
                     } else {
-                        format!("`{name}` is a class: write `extends {name}`")
+                        syn::Error::new(
+                            name.span(),
+                            format!("`{name}` is a class, not an interface"),
+                        )
+                        .help(format!("as in Java, a class `extends {name}`"))
                     };
-                    errors.push(syn::Error::new(name.span(), msg));
+                    errors.push(e);
                     ok = false;
                     continue;
                 }
@@ -342,7 +371,8 @@ impl Index {
             if let Some(f) = self.classes[c].fields.iter().find(|f| f.name == *name) {
                 if f.is_static {
                     return Err(format!(
-                        "`{name}` is a static field of `{0}`: write `{0}::{name}` or `Self::{name}`",
+                        "`{name}` is a static field of `{0}`, not a field of `this`{HELP}write \
+                         `{0}::{name}` or `Self::{name}` (Java's `{0}.{name}`)",
                         self.classes[c].name
                     ));
                 }
@@ -354,10 +384,36 @@ impl Index {
         }
         Err(match private_in {
             Some(c) => format!(
-                "field `{name}` is private to class `{}`",
+                "field `{name}` is private to class `{0}`{HELP}declare it `protected {name}` in \
+                 `{0}` to use it in subclasses, as in Java",
                 self.classes[c].name
             ),
-            None => format!("class `{}` has no field `{name}`", self.classes[class].name),
+            None => {
+                let visible: Vec<String> = self.chains[class]
+                    .iter()
+                    .flat_map(|&c| {
+                        self.classes[c]
+                            .instance_fields()
+                            .filter(move |f| c == class || f.access != Access::Private)
+                    })
+                    .map(|f| f.name.to_string())
+                    .collect();
+                let msg = format!("class `{}` has no field `{name}`", self.classes[class].name);
+                match similar(&name.to_string(), visible.iter().map(String::as_str)) {
+                    Some(f) => format!("{msg}{HELP}did you mean `this.{f}`?"),
+                    None if visible.is_empty() => {
+                        format!("{msg}{HELP}declare it in the class: `{name}: Type;`")
+                    }
+                    None => format!(
+                        "{msg}{HELP}the fields `this` has here are: {}",
+                        visible
+                            .iter()
+                            .map(|f| format!("`{f}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            }
         })
     }
 
@@ -373,7 +429,8 @@ impl Index {
             if let Some(f) = self.classes[c].static_fields().find(|f| f.name == *name) {
                 return Some(if f.access == Access::Private && c != from {
                     Err(format!(
-                        "static field `{name}` is private to class `{}`",
+                        "static field `{name}` is private to class `{0}`{HELP}declare it \
+                         `protected static {name}` in `{0}` to use it in subclasses",
                         self.classes[c].name
                     ))
                 } else {
@@ -402,6 +459,18 @@ impl Index {
             .find(|m| m.access == Access::Private && !m.is_static && m.name() == name)
     }
 
+    /// Every method name class `ci` inherits (superclasses, interfaces, `Object`), for
+    /// "did you mean" suggestions.
+    fn inherited_method_names(&self, ci: usize) -> Vec<String> {
+        let mut names: Vec<String> = OBJECT_METHODS.iter().map(|m| (*m).to_string()).collect();
+        for t in self.supertypes(ci).filter(|&t| t != ci) {
+            for m in self.classes[t].methods.iter().filter(|m| m.is_virtual()) {
+                names.push(m.name().to_string());
+            }
+        }
+        names
+    }
+
     pub fn find(&self, name: &Ident) -> Option<usize> {
         self.classes.iter().position(|c| c.name == *name)
     }
@@ -427,18 +496,24 @@ impl Index {
             for &d in &g.decls[1..] {
                 let (m, p, r) = sig(d);
                 if (&p, &r) != (&p0, &r0) {
+                    let (a, b) = (&self.classes[d].name, &self.classes[g.decls[0]].name);
                     let mut e = syn::Error::new(
                         m.name().span(),
                         format!(
-                            "`{}.{}` and `{}.{}` must have the same signature: a class \
+                            "`{a}.{0}` and `{b}.{0}` must have the same signature: a class \
                              implements both with one method",
-                            self.classes[d].name, g.name, self.classes[g.decls[0]].name, g.name
+                            g.name
                         ),
-                    );
+                    )
+                    .help(format!(
+                        "make the parameter and return types of `{a}.{0}` and `{b}.{0}` identical \
+                         (roost does not support Java's covariant return types)",
+                        g.name
+                    ));
                     let first = self.virtual_method(g.decls[0], &g.name).expect("declared");
                     e.combine(syn::Error::new(
                         first.name().span(),
-                        "the other declaration",
+                        format!("the other declaration of `{}`", g.name),
                     ));
                     errors.push(e);
                 }
@@ -454,7 +529,7 @@ impl Index {
     }
 
     fn check_duplicates(&self, class: &Class, errors: &mut Vec<syn::Error>) {
-        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        let mut err = |span: Span, msg: String| errors.push(error(span, &msg));
         for (i, f) in class.fields.iter().enumerate() {
             if class.fields[..i].iter().any(|g| g.name == f.name) {
                 err(f.name.span(), format!("duplicate field `{}`", f.name));
@@ -504,17 +579,20 @@ impl Index {
 
     fn check_class(&self, ci: usize, errors: &mut Vec<syn::Error>) {
         let class = &self.classes[ci];
-        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        let mut err = |span: Span, msg: String| errors.push(error(span, &msg));
         if let (Some(parent), Some(p)) = (&class.parent, self.parent(ci))
             && self.classes[p].final_.is_some()
         {
             err(
                 parent.span(),
-                format!("cannot inherit from final class `{parent}`"),
+                format!(
+                    "cannot inherit from final class `{parent}`{HELP}remove `final` from `{parent}` \
+                     if it is meant to be extended"
+                ),
             );
         }
         self.check_duplicates(class, errors);
-        let mut err = |span: Span, msg: String| errors.push(syn::Error::new(span, msg));
+        let mut err = |span: Span, msg: String| errors.push(error(span, &msg));
         for m in &class.methods {
             let name = m.name();
             if RESERVED.iter().any(|o| name == o) {
@@ -530,25 +608,35 @@ impl Index {
                 err(
                     a,
                     format!(
-                        "abstract method `{name}` in class `{0}`, which is not abstract: declare \
-                         `abstract class {0}`",
+                        "abstract method `{name}` in class `{0}`, which is not abstract{HELP}\
+                         declare `abstract class {0}`, or give the method a body",
                         class.name
                     ),
                 );
             }
             let above = self.declared_above(ci, name);
             match (&above, m.is_virtual(), m.override_) {
-                (None, _, Some(span)) => err(
-                    span,
-                    format!(
-                        "method `{name}` does not override or implement a method from a \
-                         superclass, an interface or `Object`"
-                    ),
-                ),
+                (None, _, Some(_)) => {
+                    let inherited = self.inherited_method_names(ci);
+                    let help =
+                        match similar(&name.to_string(), inherited.iter().map(String::as_str)) {
+                            Some(m) => format!("did you mean `{m}`?"),
+                            None => "remove `@Override` if this is a new method".to_string(),
+                        };
+                    err(
+                        name.span(),
+                        format!(
+                            "method `{name}` is marked @Override but does not override or \
+                             implement a method from a superclass, an interface or \
+                             `Object`{HELP}{help}"
+                        ),
+                    );
+                }
                 (Some(a), true, None) => err(
                     name.span(),
                     format!(
-                        "method `{name}` {} `{}.{name}` but is not marked @Override",
+                        "method `{name}` {} `{}.{name}` but is not marked @Override{HELP}write \
+                         `@Override` before the method: roost requires it (Java only recommends it)",
                         if matches!(a, Above::Type(t) if self.classes[*t].is_interface()) {
                             "implements"
                         } else {
@@ -587,7 +675,8 @@ impl Index {
                 err(
                     name.span(),
                     format!(
-                        "cannot override final method `{}.{name}`",
+                        "cannot override final method `{0}.{name}`{HELP}remove `final` from \
+                         `{0}.{name}`, or give this method another name",
                         self.classes[owner].name
                     ),
                 );
@@ -624,7 +713,7 @@ impl Index {
                 err(
                     class.name.span(),
                     format!(
-                        "class `{}` is not abstract and does not implement {}: implement {} \
+                        "class `{}` is not abstract and does not implement {}{HELP}implement {} \
                          (with @Override) or declare the class `abstract`",
                         class.name,
                         missing.join(", "),

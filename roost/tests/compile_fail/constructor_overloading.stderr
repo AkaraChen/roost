@@ -1,0 +1,7 @@
+error: class `Dog` already has a constructor: overloading is not supported
+ --> tests/compile_fail/constructor_overloading.rs:7:16
+  |
+7 |         public Dog(name: String) { this.name = name; }
+  |                ^^^
+  |
+  = help: keep one constructor that takes every parameter, and add `public static fn` factory methods for the other combinations (they can call `Self::new(..)`)

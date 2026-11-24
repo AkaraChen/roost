@@ -1,11 +1,15 @@
-error: `Pet` is an interface: write `implements Pet`
+error: `Pet` is an interface, not a class
  --> tests/compile_fail/implements_a_class.rs:7:23
   |
 7 |     class Cat extends Pet {}
   |                       ^^^
+  |
+  = help: as in Java, a class `implements Pet`
 
-error: `Animal` is a class: write `extends Animal`
+error: `Animal` is a class, not an interface
  --> tests/compile_fail/implements_a_class.rs:6:26
   |
 6 |     class Dog implements Animal {}
   |                          ^^^^^^
+  |
+  = help: as in Java, a class `extends Animal`

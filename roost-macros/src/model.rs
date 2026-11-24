@@ -21,6 +21,18 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Block, Expr, FnArg, Ident, PatType, Signature, Token, Type, braced};
 
+use crate::diag::{Help, similar};
+
+/// Everything that can come before a member's name.
+const MODIFIERS: &[&str] = &[
+    "public",
+    "protected",
+    "private",
+    "static",
+    "abstract",
+    "final",
+];
+
 mod kw {
     syn::custom_keyword!(public);
     syn::custom_keyword!(protected);
@@ -161,9 +173,9 @@ impl Parse for Hierarchy {
 
 fn parse_access(input: ParseStream) -> syn::Result<Access> {
     if input.peek(Token![pub]) {
-        return Err(
-            input.error("write `public`, `protected` or `private` (Java modifiers), not `pub`")
-        );
+        return Err(input
+            .error("`pub` is Rust's modifier; inside `class!` write Java's")
+            .help("write `public`, `protected` or `private` (or nothing, for package-private)"));
     }
     Ok(if input.parse::<Option<kw::public>>()?.is_some() {
         Access::Public
@@ -237,6 +249,9 @@ impl Parse for Class {
             }
             return parse_interface(input, attrs, access);
         }
+        if !input.peek(kw::class) {
+            return Err(unexpected_before_class(input));
+        }
         input.parse::<kw::class>()?;
         let name: Ident = input.parse()?;
         if input.peek(Token![<]) {
@@ -245,7 +260,19 @@ impl Parse for Class {
             ));
         }
         let parent = if input.parse::<Option<kw::extends>>()?.is_some() {
-            Some(input.parse()?)
+            let parent: Ident = input.parse()?;
+            if input.peek(Token![,]) {
+                let comma: Token![,] = input.parse()?;
+                let other: Option<Ident> = input.parse()?;
+                let other = other.map_or_else(|| "the other one".to_string(), |o| format!("`{o}`"));
+                return Err(
+                    syn::Error::new(comma.span, "a class can extend only one class").help(format!(
+                        "as in Java, there is single inheritance: make {other} an `interface` and \
+                     write `extends {parent} implements ..`"
+                    )),
+                );
+            }
+            Some(parent)
         } else {
             None
         };
@@ -462,7 +489,18 @@ fn parse_member(input: ParseStream, class: &mut Class) -> syn::Result<()> {
         return Ok(());
     }
 
+    if !input.peek(syn::Ident) {
+        return Err(input
+            .error("expected a field, a constructor or a method")
+            .help(
+                "a field is `name: Type;`, a method `fn name(..) -> Type { .. }`, a \
+                   constructor is named after the class: `ClassName(..) { .. }`",
+            ));
+    }
     let name: Ident = input.parse()?;
+    if !input.peek(Token![:]) && !input.peek(syn::token::Paren) {
+        return Err(java_habit(&name, input));
+    }
     if let Some(span) = override_ {
         return Err(syn::Error::new(span, "@Override only applies to methods"));
     }
@@ -496,7 +534,11 @@ fn parse_member(input: ParseStream, class: &mut Class) -> syn::Result<()> {
         if class.ctor.is_some() {
             return Err(syn::Error::new(
                 name.span(),
-                "only one constructor per class is supported (no overloading in Rust)",
+                format!("class `{name}` already has a constructor: overloading is not supported"),
+            )
+            .help(
+                "keep one constructor that takes every parameter, and add `public static fn` \
+                 factory methods for the other combinations (they can call `Self::new(..)`)",
             ));
         }
         class.ctor = Some(Ctor {
@@ -511,13 +553,20 @@ fn parse_member(input: ParseStream, class: &mut Class) -> syn::Result<()> {
 
     // Field.
     if input.peek(syn::token::Paren) {
-        return Err(syn::Error::new(
+        let class_name = class.name.to_string();
+        let e = syn::Error::new(
             name.span(),
-            format!(
-                "a constructor must be named after its class `{}`; a method needs `fn`",
-                class.name
-            ),
-        ));
+            format!("`{name}(..)` is neither the constructor of `{class_name}` nor a method"),
+        );
+        return Err(
+            if similar(&name.to_string(), [class_name.as_str()]).is_some() {
+                e.help(format!(
+                    "a constructor is named exactly like its class: did you mean `{class_name}`?"
+                ))
+            } else {
+                e.help(format!("a method needs `fn`: `fn {name}(..) {{ .. }}`"))
+            },
+        );
     }
     input.parse::<Token![:]>()?;
     let ty: Type = input.parse()?;
@@ -526,6 +575,15 @@ fn parse_member(input: ParseStream, class: &mut Class) -> syn::Result<()> {
     } else {
         None
     };
+    if !input.peek(Token![;]) {
+        let last = init.as_ref().map_or_else(|| ty.span(), Spanned::span);
+        return Err(
+            syn::Error::new(last, format!("missing `;` after field `{name}`")).help(format!(
+                "as in Java, a field declaration ends with `;`: `{name}: {};`",
+                quote!(#ty).to_string().replace(' ', "")
+            )),
+        );
+    }
     input.parse::<Token![;]>()?;
     class.fields.push(Field {
         attrs,
@@ -538,11 +596,86 @@ fn parse_member(input: ParseStream, class: &mut Class) -> syn::Result<()> {
     Ok(())
 }
 
+/// After a member's leading identifier `first`, something other than `:` (field) or `(`
+/// (constructor) follows. Explain the Java habit that most likely produced it.
+fn java_habit(first: &Ident, input: ParseStream) -> syn::Error {
+    let word = first.to_string();
+    // `pubilc fn f()`, `statc x: i32;`
+    if let Some(m) = similar(&word, MODIFIERS.iter().copied()) {
+        return syn::Error::new(first.span(), format!("unknown modifier `{word}`"))
+            .help(format!("did you mean `{m}`?"));
+    }
+    if input.peek(syn::Ident) {
+        let fork = input.fork();
+        let second: Ident = fork.parse().expect("peeked");
+        // `void bark() {..}` / `String name() {..}`: a Java method declaration.
+        if fork.peek(syn::token::Paren) {
+            let help = if word == "void" {
+                format!(
+                    "write `fn {second}(..) {{ .. }}`: a method without `->` returns nothing, like `void`"
+                )
+            } else {
+                format!(
+                    "write `fn {second}(..) -> {word} {{ .. }}`: methods start with `fn`, and the return type goes after `->`"
+                )
+            };
+            return syn::Error::new(first.span(), "Java-style method declaration").help(help);
+        }
+        // `String name;` / `int age = 3;`: a Java field declaration.
+        if fork.peek(Token![;]) || fork.peek(Token![=]) {
+            return syn::Error::new(
+                first.span(),
+                "Java-style field declaration: the type comes after the name",
+            )
+            .help(format!("write `{second}: {};`", java_type(&word)));
+        }
+    }
+    syn::Error::new(first.span(), format!("unexpected `{word}`")).help(
+        "a field is `name: Type;`, a method `fn name(..) -> Type { .. }`, a constructor is \
+               named after the class: `ClassName(..) { .. }`",
+    )
+}
+
+/// The Rust spelling of a Java type name, for help messages.
+fn java_type(java: &str) -> &str {
+    match java {
+        "int" => "i32",
+        "long" => "i64",
+        "short" => "i16",
+        "byte" => "i8",
+        "double" => "f64",
+        "float" => "f32",
+        "boolean" => "bool",
+        "char" => "char",
+        other => other,
+    }
+}
+
+/// Before `class` / `interface`, something else: a misspelled keyword or modifier.
+fn unexpected_before_class(input: ParseStream) -> syn::Error {
+    let fork = input.fork();
+    match fork.parse::<Ident>() {
+        Ok(word) => {
+            let w = word.to_string();
+            let known = ["class", "interface", "public", "abstract", "final"];
+            match similar(&w, known) {
+                Some(k) => syn::Error::new(word.span(), format!("unknown keyword `{w}`"))
+                    .help(format!("did you mean `{k}`?")),
+                None => syn::Error::new(word.span(), "expected `class` or `interface`"),
+            }
+        }
+        Err(_) => input.error("expected `class` or `interface`"),
+    }
+}
+
 fn check_signature(sig: &Signature) -> syn::Result<()> {
     if let Some(r) = sig.receiver() {
         return Err(syn::Error::new(
             r.span(),
             "methods take no `self` parameter: `this` is implicit",
+        )
+        .help(
+            "remove the parameter and write `this.field` / `this.method()` in the body, as in Java",
         ));
     }
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {

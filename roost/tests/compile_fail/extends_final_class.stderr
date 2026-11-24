@@ -3,3 +3,5 @@ error: cannot inherit from final class `Leaf`
   |
 5 |     class Branch extends Leaf {}
   |                          ^^^^
+  |
+  = help: remove `final` from `Leaf` if it is meant to be extended

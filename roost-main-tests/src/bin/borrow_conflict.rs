@@ -1,7 +1,7 @@
 //! A borrow conflict on an inherited field. `this.name` copies the field out while holding a
 //! short read borrow; `Name::clone` calls back into the object and writes the same field
 //! during that copy. Contrived, but it is the only way left to get a conflict: field access
-//! is otherwise short borrows only (see the README).
+//! is otherwise short borrows only (see docs/design.md).
 
 use std::cell::RefCell;
 

@@ -3,3 +3,5 @@ error: method `name` implements `Pet.name` but is not marked @Override
   |
 6 |         public fn name() -> String { "Rex".into() }
   |                   ^^^^
+  |
+  = help: write `@Override` before the method: roost requires it (Java only recommends it)

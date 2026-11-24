@@ -1,0 +1,7 @@
+error: `Animal` has no no-arg constructor
+ --> tests/compile_fail/implicit_super_without_noarg_ctor.rs:9:16
+  |
+9 |         public Dog() {}
+  |                ^^^
+  |
+  = help: Java would insert `super()` here, but `Animal`'s constructor takes arguments: start this constructor with `super(..);`
