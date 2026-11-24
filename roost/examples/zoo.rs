@@ -1,9 +1,13 @@
 //! `cargo run -p roost --example zoo`: the class DSL in one screen.
 //!
+//! `#[roost::main]` runs `main` on a thread with a big stack and collects once more before
+//! exiting; with `gc_stats` it prints what the collector did (to stderr). `new!(Dog("Rex"))`
+//! is `Dog::new("Rex")`; `String` constructor parameters take a `&str` directly.
+//!
 //! Differences from the sketch in task #349:
-//! * `let a: Ref<Animal> = Dog::new(..)` without `.into()`: the upcast is an implicit
+//! * `let a: Ref<Animal> = new!(Dog(..))` without `.into()`: the upcast is an implicit
 //!   coercion (a `From` impl for it would overlap with core's `impl<T> From<T> for T`).
-//!   In expression position there is `.upcast::<Animal>()`.
+//!   In expression position there is `.upcast::<Animal>()`, or `new!(..) as Ref<Animal>`.
 //! * `Puppy` declares a constructor: `Dog` has no no-arg constructor, so the implicit
 //!   `super()` would not compile (in Java neither).
 //! * A few getters (`legs`, `tricks`) so `main` can show the fields.
@@ -69,8 +73,9 @@ class! {
     }
 }
 
+#[roost::main(stack = "64MB", gc_stats)]
 fn main() {
-    let a: Ref<Animal> = Dog::new("Rex".into());
+    let a: Ref<Animal> = new!(Dog("Rex"));
     println!("a.speak()              = {}", a.speak());
     println!("a instanceof Dog       = {}", a.instanceof::<Dog>());
 
@@ -82,9 +87,9 @@ fn main() {
     println!("Ref::ptr_eq(&a, &d)    = {}", Ref::ptr_eq(&a, &d));
 
     let zoo: Vec<Ref<Animal>> = vec![
-        Animal::new("Blob".into()),
+        new!(Animal("Blob")),
         a.clone(),
-        Puppy::new("Bit".into()).upcast(),
+        new!(Puppy("Bit")) as Ref<Animal>,
     ];
     for animal in &zoo {
         let as_dog = animal.cast::<Dog>();

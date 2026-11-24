@@ -2,9 +2,9 @@
 //!
 //! | user writes                | becomes                                                   |
 //! | -------------------------- | --------------------------------------------------------- |
-//! | `this.f` (read)            | `get(this.__roost_field_Owner_f())`: a clone, short borrow |
+//! | `this.f` (read)            | `get(field(this.__roost_field_Owner_f(), "Owner", "f"))`: a clone, short borrow |
 //! | `this.f.m(..)`             | `(&get(..)).m(..)`: `&mut self` methods don't compile      |
-//! | `this.f = e`               | `set(this.__roost_field_Owner_f(), e)`                     |
+//! | `this.f = e`               | `set(field(..), e)`                                       |
 //! | `this.f += e` (any op=)    | `{ let mut v = get(..); v += e; set(.., v) }`              |
 //! | `super.m(a)`               | `<dyn OwnerClass>::__roost_method_m(this, a)`              |
 //! | `this.p(a)`, `p` private   | `<dyn ClassClass>::__roost_private_p(this, a)`             |
@@ -89,13 +89,17 @@ impl Rewriter<'_> {
         self.errors.push(syn::Error::new(span, msg));
     }
 
-    /// `this.__roost_field_Owner_f()`, or `None` (error recorded) if `f` doesn't resolve.
+    /// `field(this.__roost_field_Owner_f(), "Owner", "f")` (the names are for runtime error
+    /// messages), or `None` (error recorded) if `f` doesn't resolve.
     fn cell(&mut self, name: &Ident) -> Option<TokenStream> {
         match self.index.resolve_field(self.class, name) {
             Ok(f) => {
-                let accessor = index::accessor_name(&self.index.classes[f.owner], name);
+                let owner = &self.index.classes[f.owner];
+                let accessor = index::accessor_name(owner, name);
                 let accessor = Ident::new(&accessor.to_string(), name.span());
-                Some(quote_spanned!(name.span()=> this.#accessor()))
+                let (class, field) = (owner.name.to_string(), name.to_string());
+                Some(quote_spanned!(name.span()=>
+                    ::roost::__private::field(this.#accessor(), #class, #field)))
             }
             Err(msg) => {
                 self.error(name.span(), msg);

@@ -156,7 +156,7 @@ class! {
     // No constructor: an implicit no-arg one that calls `super()`... which `Animal` doesn't
     // have, so Cat declares one.
     class Cat extends Animal {
-        Cat() { super("Cat".to_string()); }
+        Cat() { super("Cat"); }
         @Override public fn speak() -> String { "meow".into() }
     }
 
@@ -175,9 +175,9 @@ fn speak_via_vtable(a: &Ref<Animal>) -> String {
 
 fn zoo() -> Vec<Ref<Animal>> {
     vec![
-        Animal::new("Blob".into()),
-        Dog::new("Rex".into()),
-        Puppy::new("Bit".into(), None),
+        Animal::new("Blob"),
+        Dog::new("Rex"),
+        Puppy::new("Bit", None),
         Cat::new(),
     ]
 }
@@ -200,7 +200,7 @@ fn virtual_dispatch_over_three_levels() {
     assert_eq!(kinds[2], "[dog] Bit makes a sound, woof (squeaky)");
 
     // Through a `Ref<Dog>` too, for a method Dog introduces and Puppy overrides.
-    let dogs: Vec<Ref<Dog>> = vec![Dog::new("Rex".into()), Puppy::new("Bit".into(), None)];
+    let dogs: Vec<Ref<Dog>> = vec![Dog::new("Rex"), Puppy::new("Bit", None)];
     let fetches: Vec<String> = dogs.iter().map(|d| d.fetch()).collect();
     assert_eq!(fetches, ["Rex fetches", "Bit fetches clumsily"]);
 }
@@ -208,18 +208,18 @@ fn virtual_dispatch_over_three_levels() {
 #[test]
 fn super_calls_reach_the_parent_implementation() {
     // Puppy.speak -> super (Dog.speak) -> super (Animal.speak): each level adds its part.
-    let p = Puppy::new("Bit".into(), None);
+    let p = Puppy::new("Bit", None);
     assert_eq!(p.speak(), "Bit makes a sound, woof (squeaky)");
     // super.init() in Puppy runs Dog's init, not Animal's.
     take_log();
-    let _ = Puppy::new("Bit".into(), None);
+    let _ = Puppy::new("Bit", None);
     assert!(take_log().iter().any(|s| s == "Dog.init"));
 }
 
 #[test]
 fn virtual_call_in_a_constructor_lands_in_the_subclass() {
     take_log();
-    let d = Dog::new("Rex".into());
+    let d = Dog::new("Rex");
     assert_eq!(
         take_log(),
         [
@@ -236,7 +236,7 @@ fn virtual_call_in_a_constructor_lands_in_the_subclass() {
         "set by Dog.init, called from Animal's constructor"
     );
 
-    let p = Puppy::new("Bit".into(), None);
+    let p = Puppy::new("Bit", None);
     assert_eq!(
         take_log(),
         [
@@ -249,32 +249,32 @@ fn virtual_call_in_a_constructor_lands_in_the_subclass() {
     );
     assert_eq!(p.tricks(), 11);
 
-    let a = Animal::new("Blob".into());
+    let a = Animal::new("Blob");
     assert_eq!(take_log(), ["Animal(Blob) sees tricks=n/a", "Animal.init"]);
     assert_eq!(a.name(), "Blob");
 }
 
 #[test]
 fn field_defaults_and_initializers() {
-    let p = Puppy::new("Bit".into(), None);
+    let p = Puppy::new("Bit", None);
     assert_eq!(p.legs(), 4, "`= 4` in Animal");
     assert_eq!(p.age(), 1, "`= 1` in Puppy");
     assert_eq!(p.renames(), 0, "Default::default()");
     assert!(p.friend().is_none());
-    assert_eq!(Dog::new("Rex".into()).speak(), "Rex makes a sound, woof");
+    assert_eq!(Dog::new("Rex").speak(), "Rex makes a sound, woof");
     let c = Counter2::new();
     assert_eq!((c.inc(), c.inc()), (1, 2));
 }
 
 #[test]
 fn field_read_write_and_compound_assignment() {
-    let a = Animal::new("Blob".into());
+    let a = Animal::new("Blob");
     // legs: 4 -> *2 = 8 -> -1 = 7 -> *3 = 21 -> <<1 = 42 -> %100 = 42; name += "!"
     assert_eq!(a.fields_roundtrip(), "42 Blob! 5");
     assert_eq!(a.legs(), 42);
     assert_eq!(a.name(), "Blob!");
 
-    let d = Dog::new("Rex".into());
+    let d = Dog::new("Rex");
     d.learn();
     d.learn();
     assert_eq!(d.tricks(), 3);
@@ -284,12 +284,12 @@ fn field_read_write_and_compound_assignment() {
 fn base_method_calling_an_override_that_touches_the_same_field_does_not_panic() {
     // Animal.rename writes `name`, then calls on_renamed; Dog's override reads and writes
     // `name`. In the spike this was `GcCell<T> already mutably borrowed`.
-    let d: Ref<Animal> = Dog::new("Rex".into());
+    let d: Ref<Animal> = Dog::new("Rex");
     d.rename("Max".into());
     assert_eq!(d.name(), "Max the dog");
     assert_eq!(d.renames(), 1);
 
-    let p: Ref<Animal> = Puppy::new("Bit".into(), None);
+    let p: Ref<Animal> = Puppy::new("Bit", None);
     p.rename("Tiny".into());
     assert_eq!(p.name(), "Tiny the dog");
 }
@@ -298,18 +298,18 @@ fn base_method_calling_an_override_that_touches_the_same_field_does_not_panic() 
 fn compound_assignment_evaluates_like_java() {
     // `this.counter += this.step()`: Java reads the field, then evaluates the right side,
     // then writes. Dog.step adds 100 to the counter in between; that write is overwritten.
-    let a = Animal::new("Blob".into());
+    let a = Animal::new("Blob");
     assert_eq!(a.bump_counter(), 11);
-    let d = Dog::new("Rex".into());
+    let d = Dog::new("Rex");
     assert_eq!(d.bump_counter(), 15);
     assert_eq!(d.counter(), 15);
 }
 
 #[test]
 fn private_and_static_methods() {
-    assert_eq!(Dog::new("Rex".into()).shout(), "REX");
+    assert_eq!(Dog::new("Rex").shout(), "REX");
     assert_eq!(Animal::kingdom(), "Animalia");
-    assert_eq!(Puppy::new("Bit".into(), None).kingdom_of(), "Animalia");
+    assert_eq!(Puppy::new("Bit", None).kingdom_of(), "Animalia");
 }
 
 #[test]
@@ -352,8 +352,8 @@ fn instanceof_and_cast() {
 
 #[test]
 fn ptr_eq_is_reference_identity() {
-    let a = Dog::new("Rex".into());
-    let b = Dog::new("Rex".into());
+    let a = Dog::new("Rex");
+    let b = Dog::new("Rex");
     let a_as_animal: Ref<Animal> = a.clone();
     assert!(Ref::ptr_eq(&a, &a_as_animal));
     assert!(!Ref::ptr_eq(&a, &b), "equal contents, different objects");
@@ -363,15 +363,15 @@ fn ptr_eq_is_reference_identity() {
 
 #[test]
 fn class_name_and_to_string() {
-    let p: Ref<Animal> = Puppy::new("Bit".into(), None);
+    let p: Ref<Animal> = Puppy::new("Bit", None);
     assert_eq!(p.class_name(), "Puppy");
     assert_eq!(p.to_string(), format!("Puppy@{:x}", p.hash_code()));
 }
 
 #[test]
 fn ref_fields_hold_references_not_copies() {
-    let rex = Dog::new("Rex".into());
-    let p = Puppy::new("Bit".into(), Some(rex.clone()));
+    let rex = Dog::new("Rex");
+    let p = Puppy::new("Bit", Some(rex.clone()));
     let owner = p.owner().unwrap();
     assert!(Ref::ptr_eq(&owner, &rex));
     // Reading a Ref field copies the reference; the object is shared.
@@ -383,9 +383,9 @@ fn ref_fields_hold_references_not_copies() {
 fn cycle_across_three_levels_is_collected() {
     let counter = Counter::new();
     {
-        let a = Animal::new("Blob".into());
-        let d = Dog::new("Rex".into());
-        let p = Puppy::new("Bit".into(), Some(d.clone())); // p -> d via a Ref<Dog> field
+        let a = Animal::new("Blob");
+        let d = Dog::new("Rex");
+        let p = Puppy::new("Bit", Some(d.clone())); // p -> d via a Ref<Dog> field
         let all: [Ref<Animal>; 3] = [a.clone(), d.clone().upcast(), p.clone().upcast()];
         for x in &all {
             x.attach(counter.probe());
@@ -408,4 +408,42 @@ fn cycle_across_three_levels_is_collected() {
     );
     collect();
     assert_eq!((counter.finalized(), counter.dropped()), (3, 3));
+}
+
+#[test]
+fn new_macro_is_the_constructor() {
+    let d = new!(Dog("Rex"));
+    assert_eq!(d.speak(), Dog::new("Rex").speak());
+    assert_eq!(new!(Cat()).name(), "Cat");
+    let p = new!(Puppy("Bit", Some(d.clone())));
+    assert!(Ref::ptr_eq(&p.owner().unwrap(), &d));
+    // Trailing comma, and a path to the class.
+    let _ = new!(self::Puppy("Bit", None,));
+    // Upcast with `as`: it performs the same coercion as `let a: Ref<Animal> = ..`.
+    let a = new!(Dog("Rex")) as Ref<Animal>;
+    assert!(a.instanceof::<Dog>());
+    let zoo: Vec<Ref<Animal>> = vec![new!(Animal("Blob")), new!(Cat()) as Ref<Animal>];
+    assert_eq!(zoo[1].class_name(), "Cat");
+}
+
+#[test]
+fn string_constructor_parameters_take_anything_into_string() {
+    // `&str`, `String`, `&String`, `char`, `Box<str>`, `Cow<str>`: all `Into<String>`.
+    let name = String::from("Rex");
+    let all: Vec<Ref<Dog>> = vec![
+        Dog::new("Rex"),
+        Dog::new(name.clone()),
+        Dog::new(&name),
+        Dog::new(format!("R{}", "ex")),
+        Dog::new(Box::<str>::from("Rex")),
+        Dog::new(std::borrow::Cow::Borrowed("Rex")),
+    ];
+    for d in &all {
+        assert_eq!(d.name(), "Rex");
+    }
+    assert_eq!(Dog::new('R').name(), "R");
+    // ... including through `super(..)`: `Cat()` calls `super("Cat")` with a literal.
+    assert_eq!(Cat::new().name(), "Cat");
+    // Other parameter types are unchanged: `Option<Ref<Dog>>` still coerces from `None`.
+    assert!(Puppy::new("Bit", None).owner().is_none());
 }

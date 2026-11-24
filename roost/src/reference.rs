@@ -22,6 +22,7 @@ pub struct Ref<T: ?Sized + 'static>(Gc<T>);
 impl<T: Trace> Ref<T> {
     /// Allocates `value` on the GC heap. May run a collection first.
     pub fn new(value: T) -> Ref<T> {
+        crate::runtime::count_allocation();
         Ref(Gc::new(value))
     }
 }
